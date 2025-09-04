@@ -1,24 +1,24 @@
-// use alloc::string::String;
+use alloc::string::String;
 use snafu::Snafu;
 
 /// The verification error type
 #[derive(Debug, PartialEq, Snafu)]
 pub enum VerifyError {
-    //     /// Failure due to another reason.
-    //     #[snafu(display("Other Error"))]
-    //     OtherError,
-    //     /// Provided data has not valid public inputs.
-    //     #[snafu(display("Invalid public input: {}", message))]
-    //     PublicInputError { message: String },
-    //     /// Provided data has not valid proof.
-    //     #[snafu(display("Invalid Proof"))]
-    //     InvalidProofError,
-    //     /// Verify proof failed.
-    //     #[snafu(display("Verification Failed"))]
-    //     VerificationError,
-    //     /// Provided an invalid verification key.
-    //     #[snafu(display("Key Error"))]
-    //     KeyError,
+    /// Failure due to another reason.
+    #[snafu(display("Other Error"))]
+    OtherError,
+    /// Provided data has not valid public inputs.
+    #[snafu(display("Invalid public input: {}", message))]
+    PublicInputError { message: String },
+    /// Provided data has not valid proof.
+    #[snafu(display("Invalid Proof"))]
+    InvalidProofError { message: String },
+    /// Verify proof failed.
+    #[snafu(display("Verification Failed"))]
+    VerificationError,
+    /// Provided an invalid verification key.
+    #[snafu(display("Key Error: {}", message))]
+    KeyError { message: String },
 }
 
 #[derive(Debug, PartialEq)]

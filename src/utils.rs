@@ -1,14 +1,14 @@
-use crate::{
-    errors::{FieldError, GroupError},
-    types::G1,
-    Fq, Fr, U256,
-};
+use crate::{BYTE_FLAG_BITMASK, PTR_BITMASK};
+use crate::{EVMWord, Fq, Fr, U256, errors::FieldError, types::G1};
 use ark_bn254_ext::CurveHooks;
-use ark_ff::PrimeField;
+use ark_ec::AffineRepr;
+use ark_ff::{AdditiveGroup, PrimeField};
 
 pub(crate) trait IntoFq {
     fn into_fq(self) -> Fq;
 }
+
+// impl Sized for U256 {}
 
 impl IntoFq for U256 {
     fn into_fq(self) -> Fq {
@@ -33,13 +33,13 @@ pub(crate) trait IntoFr {
     fn into_fr(self) -> Fr;
 }
 
-impl IntoFr for &[u8; 32] {
+impl IntoFr for &EVMWord {
     fn into_fr(self) -> Fr {
         self.into_u256().into_fr()
     }
 }
 
-impl IntoFr for [u8; 32] {
+impl IntoFr for EVMWord {
     fn into_fr(self) -> Fr {
         (&self).into_fr()
     }
@@ -73,7 +73,13 @@ impl IntoU256 for u32 {
     }
 }
 
-impl IntoU256 for &[u8; 32] {
+impl IntoU256 for usize {
+    fn into_u256(self) -> U256 {
+        U256::from(self as u64)
+    }
+}
+
+impl IntoU256 for &EVMWord {
     fn into_u256(self) -> U256 {
         // Convert the byte array to a little-endian byte vector
         let mut bytes = self.to_vec(); // Convert the &[u8; 32] slice to a Vec<u8>
@@ -95,59 +101,77 @@ impl IntoU256 for &[u8; 32] {
     }
 }
 
-impl IntoU256 for [u8; 32] {
+impl IntoU256 for EVMWord {
     fn into_u256(self) -> U256 {
         (&self).into_u256()
     }
 }
 
-pub(crate) trait IntoBytes {
-    fn into_bytes(self) -> [u8; 32];
+/// Trait for returning a big-endian representation of some object as a `[u8; 32]`.
+pub(crate) trait IntoBEBytes32 {
+    fn into_be_bytes32(self) -> EVMWord;
 }
 
-impl IntoBytes for U256 {
-    fn into_bytes(self) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
-        for (i, limb) in self.0.iter().rev().enumerate() {
-            // Convert each limb to big-endian bytes
-            let limb_bytes = limb.to_be_bytes();
-            // Copy the bytes into the correct position in the output array
-            bytes[(i << 3)..((i + 1) << 3)].copy_from_slice(&limb_bytes);
-        }
-        bytes
+impl IntoBEBytes32 for U256 {
+    fn into_be_bytes32(self) -> EVMWord {
+        let mut rev_iter_be = self.0.iter().rev().flat_map(|limb| limb.to_be_bytes());
+        core::array::from_fn(|_| rev_iter_be.next().unwrap())
     }
 }
 
-impl IntoBytes for Fr {
-    fn into_bytes(self) -> [u8; 32] {
-        self.into_bigint().into_bytes()
+impl IntoBEBytes32 for Fr {
+    fn into_be_bytes32(self) -> EVMWord {
+        self.into_bigint().into_be_bytes32()
     }
 }
 
-impl IntoBytes for Fq {
-    fn into_bytes(self) -> [u8; 32] {
-        self.into_bigint().into_bytes()
+impl IntoBEBytes32 for Fq {
+    fn into_be_bytes32(self) -> EVMWord {
+        self.into_bigint().into_be_bytes32()
     }
 }
 
-// Parsing utility for points in G1
-pub(crate) fn read_g1_util<H: CurveHooks>(data: &[u8]) -> Result<G1<H>, GroupError> {
-    if data.len() != 64 {
-        return Err(GroupError::InvalidSliceLength {
-            expected_length: 64,
-            actual_length: data.len(),
-        });
+impl IntoBEBytes32 for u64 {
+    fn into_be_bytes32(self) -> EVMWord {
+        let be = self.to_be_bytes();
+        let mut arr = [0u8; 32];
+        arr[24..].copy_from_slice(&be);
+        arr
+    }
+}
+
+pub(crate) fn read_u256(bytes: &[u8]) -> Result<U256, ()> {
+    <&[u8; 32]>::try_from(bytes)
+        .map_err(|_| ())
+        .map(IntoU256::into_u256)
+}
+
+// Parse point in G1.
+pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>, ()> {
+    if start >= data.len() {
+        return Err(());
+    }
+    if data.len() < 64 {
+        return Err(());
     }
 
-    let x = read_fq_util(&data[0..32]).expect("Should always succeed");
-    let y = read_fq_util(&data[32..64]).expect("Should always succeed");
+    let x = Fq::from_bigint(read_u256(&data[start..(start + 32)])?).ok_or(())?;
+    let y = Fq::from_bigint(read_u256(&data[(start + 32)..(start + 64)])?).ok_or(())?;
+
+    // If (0, 0) is given, we interpret this as the point at infinity:
+    // https://docs.rs/ark-ec/0.5.0/src/ark_ec/models/short_weierstrass/affine.rs.html#212-218
+    if x == Fq::ZERO && y == Fq::ZERO {
+        return Ok(G1::zero());
+    }
 
     let point = G1::new_unchecked(x, y);
 
     // Validate point
     if !point.is_on_curve() {
-        return Err(GroupError::NotOnCurve);
+        return Err(());
     }
+    // This is always true for G1 with the BN254 curve.
+    debug_assert!(point.is_in_correct_subgroup_assuming_on_curve());
 
     Ok(point)
 }
@@ -170,4 +194,46 @@ pub(crate) fn read_fq_util(data: &[u8]) -> Result<Fq, FieldError> {
     let bigint = U256::new(limbs);
 
     Ok(bigint.into_fq())
+}
+
+// Return a `U256`'s the least significant byte.
+pub(crate) fn lsb8(num: &U256) -> usize {
+    (num.0[0] & BYTE_FLAG_BITMASK) as usize
+}
+
+// Return a `U256`'s two least significant bytes.
+pub(crate) fn lsb16(num: &U256) -> usize {
+    (num.0[0] & PTR_BITMASK) as usize
+}
+
+// Return a `U256`'s four least significant bytes.
+pub(crate) fn lsb32(num: &U256) -> usize {
+    (num.0[0] & 0xffffffff) as usize
+}
+
+// TODO: Address edge cases.
+pub(crate) fn mload(memory: &[u8], addr: u32) -> Result<EVMWord, ()> {
+    memory
+        .get(addr as usize..addr as usize + 32)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(())
+}
+
+// TODO: Address edge cases.
+// TODO: Also, better name.
+pub(crate) fn calldataload(raw_proof: &[u8], addr: u32) -> Result<EVMWord, ()> {
+    let idx = addr as usize;
+    let slice = raw_proof.get(idx..idx + 0x20).unwrap();
+    let eval_bytes: EVMWord = slice.try_into().unwrap();
+    Ok(eval_bytes)
+}
+
+pub(crate) fn u32_from_be_tail(bytes: &EVMWord) -> u32 {
+    u32::from_be_bytes(bytes[28..32].try_into().unwrap())
+}
+
+// Utility for debugging.
+pub(crate) fn to_hex_string(data: &[u8]) -> String {
+    let hex_string: String = data.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("0x{}", hex_string)
 }
