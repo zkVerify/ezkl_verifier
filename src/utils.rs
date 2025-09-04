@@ -224,8 +224,8 @@ pub(crate) fn mload(memory: &[u8], addr: u32) -> Result<EVMWord, ()> {
 pub(crate) fn calldataload(raw_proof: &[u8], addr: u32) -> Result<EVMWord, ()> {
     let idx = addr as usize;
     let slice = raw_proof.get(idx..idx + 0x20).unwrap();
-    let eval_bytes: EVMWord = slice.try_into().unwrap();
-    Ok(eval_bytes)
+    let evm_word: EVMWord = slice.try_into().unwrap();
+    Ok(evm_word)
 }
 
 pub(crate) fn u32_from_be_tail(bytes: &EVMWord) -> u32 {

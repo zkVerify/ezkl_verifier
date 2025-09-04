@@ -672,17 +672,42 @@ fn verify_proof_inner<H: CurveHooks>(
                 // Load in the last permutation_z_evals word
                 let perm_z_last_ptr = last_idx * (num_words & PTR_BITMASK as usize)
                     + permutation_z_evals_ptr as usize;
-                let idx = lsb16(&mload(memory, perm_z_last_ptr as u32).unwrap().into_u256());
-                let slice = raw_proof.get(idx..idx + 0x20).unwrap();
-                let eval_bytes: [u8; 32] = slice.try_into().unwrap();
-                let perm_z_last = eval_bytes.into_fr(); // calldataload(lsb16(&mload(memory, perm_z_last_ptr as u32).unwrap().into_u256()));
+
+                println!("perm_z_last_ptr = 0x{:x?}", perm_z_last_ptr);
+
+                let idx = lsb16(&mload(memory, perm_z_last_ptr as u32).unwrap().into_u256()) as u32;
+                // let slice = raw_proof.get(idx..idx + 0x20).unwrap();
+                // let eval_bytes: [u8; 32] = slice.try_into().unwrap();
+                // let perm_z_last = eval_bytes.into_fr(); // calldataload(lsb16(&mload(memory, perm_z_last_ptr as u32).unwrap().into_u256()));
+
+                // TODO: Maybe it's a good idea to move the "- PROOF_OFFSET" part inside the calldataload function?
+                let perm_z_last = calldataload(raw_proof, idx - PROOF_OFFSET as u32)
+                    .unwrap()
+                    .into_fr();
+
+                println!(
+                    "perm_z_last = {}",
+                    to_hex_string(&perm_z_last.into_be_bytes32())
+                );
+
                 quotient_eval_numer = quotient_eval_numer * y
                     + mload(memory, theta_mptr as u32 + 0x1C0).unwrap().into_fr()
                         * (perm_z_last * perm_z_last - perm_z_last);
 
+                println!(
+                    "quotient_eval_numer = {}",
+                    to_hex_string(&quotient_eval_numer.into_be_bytes32())
+                );
+
                 let lhs = mload(memory, theta_mptr as u32 + 0x20).unwrap().into_fr();
                 let rhs = mload(memory, theta_mptr as u32 + 0x80).unwrap().into_fr();
                 memory[vka_end..vka_end + 0x20].copy_from_slice(&(lhs * rhs).into_be_bytes32());
+
+                println!(
+                    "Storing: {} at 0x{:x?}",
+                    to_hex_string(&(lhs * rhs).into_be_bytes32()),
+                    vka_end
+                );
 
                 quotient_eval_numer = z_evals(
                     memory,
@@ -1041,26 +1066,74 @@ fn z_evals(
     quotient_eval_numer: Fr,
 ) -> Fr {
     let mut num_words = lsb16(&num_words_packed);
+
+    println!(
+        "======================================== z_evals ========================================"
+    );
+    println!(
+        "num_words_packed = {}",
+        to_hex_string(&num_words_packed.into_be_bytes32())
+    );
+    println!("num_words = 0x{:x?}", num_words);
+
     let mut quotient_eval_numer = quotient_eval_numer;
     let mut z = z;
     let mut permutation_z_evals_ptr = permutation_z_evals_ptr;
+
+    println!(
+        "quotient_eval_numer = {}",
+        to_hex_string(&quotient_eval_numer.into_be_bytes32())
+    );
+    println!("z = {}", to_hex_string(&z.into_be_bytes32()));
+    println!("permutation_z_evals_ptr = 0x{:x?}", permutation_z_evals_ptr);
+
     // Initialize the free static memory pointer to store the column evals.
-    let idx = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize + 0x20;
-    let val = u32_from_be_tail(&mload(memory, 0x40).unwrap()) + 0x40;
-    memory[idx..idx + 0x20].copy_from_slice(&val.into_u256().into_be_bytes32()); // DOUBLE-CHECK FOR CORRECTNESS!!!
+    let ptr = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let idx = ptr as usize + 0x20;
+    let val = ptr + 0x40;
+    memory[idx..idx + 0x20].copy_from_slice(&val.into_u256().into_be_bytes32()); // TODO: DOUBLE-CHECK FOR CORRECTNESS!!!
+
+    println!(
+        "Writing {} at 0x{:x?}",
+        to_hex_string(&val.into_u256().into_be_bytes32()),
+        idx
+    );
+
     // Iterate through the tuple window length ( permutation_z_evals_len.len() - 1 ) offset by one word.
     // for { } lt(permutation_z_evals_ptr, perm_z_last_ptr) { } {
     while permutation_z_evals_ptr < perm_z_last_ptr {
         let next_z_ptr = permutation_z_evals_ptr + num_words;
+
+        println!("next_z_ptr = 0x{:x?}", next_z_ptr);
+
         let z_j = mload(memory, next_z_ptr as u32).unwrap().into_u256();
-        let idx1 = lsb16(&z_j);
-        let slice1 = raw_proof.get(idx1..idx1 + 0x20).unwrap();
-        let lhs_bytes: [u8; 32] = slice1.try_into().unwrap();
-        let idx2 = lsb16(&(z >> 32));
-        let slice2 = raw_proof.get(idx2..idx2 + 0x20).unwrap();
-        let rhs_bytes: [u8; 32] = slice2.try_into().unwrap();
-        let temp = lhs_bytes.into_fr() - rhs_bytes.into_fr();
-        quotient_eval_numer = quotient_eval_numer * y + l_0 * temp;
+
+        println!("z_j = {}", to_hex_string(&z_j.into_be_bytes32()));
+
+        // let idx1 = lsb16(&z_j);
+        // let slice1 = raw_proof.get(idx1..idx1 + 0x20).unwrap();
+        // let lhs_bytes: [u8; 32] = slice1.try_into().unwrap();
+
+        let lhs = calldataload(raw_proof, (lsb16(&z_j) - PROOF_OFFSET) as u32)
+            .unwrap()
+            .into_fr();
+
+        // let idx2 = lsb16(&(z >> 32));
+        // let slice2 = raw_proof.get(idx2..idx2 + 0x20).unwrap();
+        // let rhs_bytes: [u8; 32] = slice2.try_into().unwrap();
+
+        let rhs = calldataload(raw_proof, (lsb16(&(z >> 32)) - PROOF_OFFSET) as u32)
+            .unwrap()
+            .into_fr();
+
+        // let temp = lhs - rhs;
+        quotient_eval_numer = quotient_eval_numer * y + l_0 * (lhs - rhs);
+
+        println!(
+            "quotient_eval_numer = {}",
+            to_hex_string(&quotient_eval_numer.into_be_bytes32())
+        );
+
         col_evals(
             memory,
             raw_proof,
@@ -1103,6 +1176,10 @@ fn col_evals(
     permutation_z_evals_ptr: usize,
     theta_mptr: usize,
 ) {
+    println!(
+        "======================================== col_evals ========================================"
+    );
+
     let mut z = z;
     let gamma = mload(memory, theta_mptr as u32 + 0x40).unwrap().into_fr();
     let beta = mload(memory, theta_mptr as u32 + 0x20).unwrap().into_fr();
@@ -1111,15 +1188,24 @@ fn col_evals(
     let l_blind = mload(memory, theta_mptr as u32 + 0x1e0).unwrap().into_fr();
     let i_eval = mload(memory, theta_mptr as u32 + 0x220).unwrap().into_fr();
     // Extract the index 1 and index 0 z evaluations from the z word.
-    let idx1 = lsb16(&(z >> 16));
-    let lhs_slice = raw_proof.get(idx1..idx1 + 0x20).unwrap();
-    let lhs_bytes: [u8; 32] = lhs_slice.try_into().unwrap();
-    let mut lhs = lhs_bytes.into_fr();
+    // let idx1 = lsb16(&(z >> 16));
+    // let lhs_slice = raw_proof.get(idx1..idx1 + 0x20).unwrap();
+    // let lhs_bytes: [u8; 32] = lhs_slice.try_into().unwrap();
+    // let mut lhs = lhs_bytes.into_fr();
+    let mut lhs = calldataload(raw_proof, (lsb16(&(z >> 16)) - PROOF_OFFSET) as u32)
+        .unwrap()
+        .into_fr();
 
-    let idx2 = lsb16(&z);
-    let rhs_slice = raw_proof.get(idx2..idx2 + 0x20).unwrap();
-    let rhs_bytes: [u8; 32] = rhs_slice.try_into().unwrap();
-    let mut rhs = rhs_bytes.into_fr();
+    // let idx2 = lsb16(&z);
+    // let rhs_slice = raw_proof.get(idx2..idx2 + 0x20).unwrap();
+    // let rhs_bytes: [u8; 32] = rhs_slice.try_into().unwrap();
+    // let mut rhs = rhs_bytes.into_fr();
+    let mut rhs = calldataload(raw_proof, (lsb16(&z) - PROOF_OFFSET) as u32)
+        .unwrap()
+        .into_fr();
+
+    println!("lhs = {}", to_hex_string(&lhs.into_be_bytes32()));
+    println!("rhs = {}", to_hex_string(&rhs.into_be_bytes32()));
 
     z >>= 48;
     // loop through the word_len_chunk
