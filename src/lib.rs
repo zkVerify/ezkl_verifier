@@ -868,27 +868,202 @@ fn verify_proof_inner<H: CurveHooks>(
     }
 
     // Compute pairing lhs and rhs
-    // {
-    //     // point_computations
-    //     let pcs_ptr := u32_from_be_tail(&mload(memory, 0x03a0 + VKA_OFFSET + 5 * 0x20).unwrap()); // 0x0440
-    //     {
-    //         let point_computations := mload(pcs_ptr)
-    //         let x := mload(add(theta_mptr, 0x80))
-    //         let omega := mload(0x0180)
-    //         let omega_inv := mload(0x01a0)
-    //         let x_pow_of_omega := mulmod(x, omega, R)
-    //         x_pow_of_omega, pcs_ptr := point_rots(point_computations, pcs_ptr, 8, x_pow_of_omega, omega, vka_end)
-    //         pcs_ptr := add(pcs_ptr, 0x20)
-    //         point_computations := mload(pcs_ptr)
-    //         // Store interm point
-    //         mstore(add(and(point_computations, PTR_BITMASK), vka_end), x)
-    //         x_pow_of_omega := mulmod(x, omega_inv, R)
-    //         point_computations := shr(16, point_computations)
-    //         x_pow_of_omega, pcs_ptr := point_rots(point_computations, pcs_ptr, 24, x_pow_of_omega, omega_inv, vka_end)
-    //         pcs_ptr := add(pcs_ptr, 0x20)
-    //         pop(x_pow_of_omega)
-    //     }
-    // }
+    {
+        // point_computations
+        let mut pcs_ptr =
+            u32_from_be_tail(&mload(memory, 0x03a0 + VKA_OFFSET as u32 + 5 * 0x20).unwrap())
+                as usize; // 0x0440
+        {
+            let mut point_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let x = mload(memory, theta_mptr as u32 + 0x80).unwrap().into_fr(); // Is this a point or a scalar?
+            let omega = mload(memory, 0x0180).unwrap().into_fr();
+            let omega_inv = mload(memory, 0x01a0).unwrap().into_fr();
+            let mut x_pow_of_omega = x * omega;
+            (x_pow_of_omega, pcs_ptr) = point_rots(
+                memory,
+                point_computations,
+                pcs_ptr,
+                8,
+                x_pow_of_omega,
+                omega,
+                vka_end,
+            )
+            .unwrap();
+            pcs_ptr += 0x20;
+            point_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            // Store interm point
+            // mstore(add(and(point_computations, PTR_BITMASK), vka_end), x)
+            let idx = vka_end + lsb16(&point_computations);
+            memory[idx..idx + 0x20].copy_from_slice(&x.into_be_bytes32()); // Is this a point or a scalar?
+            x_pow_of_omega = x * omega_inv;
+            point_computations >>= 16;
+            (x_pow_of_omega, pcs_ptr) = point_rots(
+                memory,
+                point_computations,
+                pcs_ptr,
+                24,
+                x_pow_of_omega,
+                omega_inv,
+                vka_end,
+            )
+            .unwrap();
+            pcs_ptr += 0x20;
+            // pop(x_pow_of_omega)
+        }
+
+        // vanishing_computations
+        {
+            let mu = mload(memory, theta_mptr as u32 + 0xE0).unwrap().into_fr();
+
+            println!("mu = {}", to_hex_string(&mu.into_be_bytes32()));
+
+            let mut vanishing_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+
+            println!(
+                "vanishing_computations = {}",
+                to_hex_string(&vanishing_computations.into_be_bytes32())
+            );
+
+            // mstore(add(0x20, vka_end), 1)
+            memory[(vka_end + 0x20)..(vka_end + 0x40)]
+                .copy_from_slice(&U256::one().into_be_bytes32());
+
+            println!(
+                "Store {} at 0x{:x?}",
+                to_hex_string(&U256::one().into_be_bytes32()),
+                vka_end + 0x20
+            );
+
+            // for
+            //     {
+            //         let mptr := and(vanishing_computations, PTR_BITMASK)
+            //         vanishing_computations >>= 16;
+            //         let mptr_end := and(vanishing_computations, PTR_BITMASK)
+            //         vanishing_computations >>= 16;
+            //         let point_mptr := and(vanishing_computations, PTR_BITMASK)
+            //     }
+            //     lt(mptr, mptr_end)
+            //     {
+            //         mptr += 0x20
+            //         point_mptr += 0x20
+            //     }
+            // {
+            //     mstore(add(vka_end, mptr), addmod(mu, sub(R, mload(add(point_mptr, vka_end))), R))
+            // }
+            let mut mptr = lsb16(&vanishing_computations);
+            vanishing_computations >>= 16;
+            let mptr_end = lsb16(&vanishing_computations);
+            vanishing_computations >>= 16;
+            let mut point_mptr = lsb16(&vanishing_computations);
+            while mptr < mptr_end {
+                let idx = vka_end + mptr;
+                let val = mu
+                    - mload(memory, (point_mptr + vka_end) as u32)
+                        .unwrap()
+                        .into_fr();
+                // mstore(add(vka_end, mptr), val);
+                memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+                println!(
+                    "Store: {} at 0x{:x?}",
+                    to_hex_string(&val.into_be_bytes32()),
+                    idx
+                );
+
+                mptr += 0x20;
+                point_mptr += 0x20;
+            }
+
+            vanishing_computations >>= 16;
+            let num_words = lsb8(&vanishing_computations);
+            vanishing_computations >>= 8;
+            let mut s = mload(memory, (vka_end + lsb16(&vanishing_computations)) as u32)
+                .unwrap()
+                .into_fr();
+            vanishing_computations >>= 16;
+            // for { let i } lt(i, num_words) { i := add(i, 1) } {
+            for _ in 0..num_words {
+                // for {  } vanishing_computations {  } {
+                while !vanishing_computations.is_zero() {
+                    s = s * mload(memory, (vka_end + lsb16(&vanishing_computations)) as u32)
+                        .unwrap()
+                        .into_fr();
+                    vanishing_computations >>= 16;
+                }
+                pcs_ptr += 0x20;
+                vanishing_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            }
+            let mut diff_ptr = vka_end + lsb16(&vanishing_computations);
+            // mstore(diff_ptr, s)
+            memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&s.into_be_bytes32());
+
+            println!(
+                "Store s = {} at 0x{:x?}",
+                to_hex_string(&s.into_be_bytes32()),
+                diff_ptr
+            );
+
+            vanishing_computations >>= 16;
+            let mut diff: Fr;
+            let sets_len = lsb16(&vanishing_computations);
+            pcs_ptr += 0x20;
+            vanishing_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            // for { let i := 0 } lt(i, sets_len) { i := add(i, 1) } {
+            for i in 0..sets_len {
+                diff = mload(memory, (lsb16(&vanishing_computations) + vka_end) as u32)
+                    .unwrap()
+                    .into_fr();
+                vanishing_computations >>= 16;
+                // for { } vanishing_computations { } {
+                while !vanishing_computations.is_zero() {
+                    diff = diff
+                        * mload(memory, (lsb16(&vanishing_computations) + vka_end) as u32)
+                            .unwrap()
+                            .into_fr();
+                    vanishing_computations >>= 16;
+                }
+                diff_ptr += 0x20;
+                // mstore(diff_ptr, diff)
+                memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&diff.into_be_bytes32());
+
+                println!(
+                    "Store diff = {} at 0x{:x?}",
+                    to_hex_string(&diff.into_be_bytes32()),
+                    diff_ptr
+                );
+
+                if i == 0 {
+                    // mstore(vka_end, diff)
+                    memory[vka_end..vka_end + 0x20].copy_from_slice(&diff.into_be_bytes32());
+
+                    println!(
+                        "[IF] Store diff = {} at 0x{:x?}",
+                        to_hex_string(&diff.into_be_bytes32()),
+                        diff_ptr
+                    );
+                }
+                pcs_ptr += 0x20;
+                vanishing_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            }
+        }
+        // coeff_computations
+        // {
+        //     let coeff_len_data := mload(pcs_ptr)
+        //     // Load in the least significant byte of the `coeff_len_data` word to get the total number of words we will need to load in
+        //     // that contains the packed Vec<set.rots().len()>.
+        //     let end_ptr_packed_lens := add(pcs_ptr, mul(0x20, and(coeff_len_data, BYTE_FLAG_BITMASK)))
+        //     coeff_len_data := shr(8, coeff_len_data)
+        //     let i := pcs_ptr
+        //     pcs_ptr := end_ptr_packed_lens
+        //     for {  } lt(i, end_ptr_packed_lens) { i := add(i, 0x20) } {
+        //         for {  } coeff_len_data { } {
+        //             coeff_len_data := coeff_computations(coeff_len_data, mload(pcs_ptr))
+        //             pcs_ptr := add(pcs_ptr, 0x20)
+        //         }
+        //         coeff_len_data := mload(add(i, 0x20))
+        //     }
+        // }
+    }
 
     Ok(())
 }
@@ -1716,6 +1891,58 @@ fn col_evals(
 //     ret1 := table
 //     ret2 := quotient_eval_numer
 // }
+
+// TODO: DO PROPER ERROR HANDLING...
+fn point_rots(
+    memory: &mut [u8],
+    mut pcs_computations: U256,
+    mut pcs_ptr: usize,
+    mut word_shift: u32,
+    mut x_pow_of_omega: Fr,
+    omega: Fr,
+    vka_end: usize,
+) -> Result<(Fr, usize), ()> {
+    // Extract the 32 LSG bits (4 bytes) from the pcs_computations word to get the max rot
+    let values_max_rot = lsb8(&pcs_computations);
+    pcs_computations >>= 8;
+    // for { let i := 0 } lt(i, values_max_rot) { i := add(i, 1) } {
+    for i in 0..values_max_rot {
+        let value = lsb16(&pcs_computations);
+        if value != 0 {
+            // mstore(add(vka_end, value), x_pow_of_omega)
+            let idx = vka_end + value;
+            memory[idx..idx + 0x20].copy_from_slice(&x_pow_of_omega.into_be_bytes32());
+
+            println!(
+                "Write x_pow_of_omega = {} at 0x{:x?}",
+                to_hex_string(&x_pow_of_omega.into_be_bytes32()),
+                idx
+            );
+        }
+        if i == values_max_rot - 1 {
+            break;
+        }
+        x_pow_of_omega *= omega;
+        word_shift >>= 16;
+        pcs_computations >>= 16;
+        if word_shift == 256 {
+            word_shift = 0;
+            pcs_ptr += 0x20;
+            pcs_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256(); // TODO: IS THIS CORRECT?
+        }
+    }
+    // ret0 := x_pow_of_omega
+    // ret1 := pcs_ptr
+
+    println!("point_rots returns:");
+    println!(
+        "x_pow_of_omega = {}",
+        to_hex_string(&x_pow_of_omega.into_be_bytes32())
+    );
+    println!("pcs_ptr = 0x{:x?}", pcs_ptr);
+
+    Ok((x_pow_of_omega, pcs_ptr))
+}
 
 // Scale point at (0x00, 0x20) by scalar.
 fn ec_mul_acc<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
