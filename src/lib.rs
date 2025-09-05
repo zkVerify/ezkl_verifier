@@ -8,8 +8,10 @@ mod types;
 mod utils;
 // mod vk;
 
-use ark_bn254_ext::CurveHooks;
-use ark_ec::AffineRepr;
+use core::num;
+
+use ark_bn254_ext::{CurveHooks, G1Projective};
+use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
 use sha3::{Digest, Keccak256};
 
@@ -723,7 +725,170 @@ fn verify_proof_inner<H: CurveHooks>(
                 );
             }
         }
+        {
+            // lookup computations
+            // mstore(vka_end, mload(add(theta_mptr, 0x1C0)))
+            let value = &mload(&memory, theta_mptr as u32 + 0x1c0).unwrap();
+            memory[vka_end..vka_end + 0x20].copy_from_slice(value); // l_last
+            // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x200)))
+            let value = &mload(memory, theta_mptr as u32 + 0x200).unwrap();
+            memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(value); // l_0
+            // mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x1E0)))
+            let value = &mload(memory, 0x1e0).unwrap();
+            memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(value); // l_blind
+            // mstore(add(0x60, vka_end), mload(theta_mptr))
+            let value = &mload(memory, theta_mptr as u32).unwrap();
+            memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(value); // theta
+            // mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x20)))
+            let value = &mload(memory, theta_mptr as u32 + 0x20).unwrap();
+            memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(value); // beta
+            let (mut evals_ptr, meta_data) =
+                soa_layout_metadata(memory, 0x380 + VKA_OFFSET + 5 * 0x20);
+
+            // lookup meta data contains 32 byte flags for indicating if we need to do a lookup table lines
+            // expression evaluation or we can use the previous one cached in the table var.
+            if meta_data != 0 {
+                todo!("Restore this code on the second pass")
+                // let mut table: U256;
+                // let end_ptr = meta_data as u64 & PTR_BITMASK;
+                // let mv = (meta_data >> 16) as u64 & BYTE_FLAG_BITMASK;
+                // match mv {
+                //     0x0 => {
+                //         while evals_ptr < end_ptr {
+                //             evals_ptr, table, quotient_eval_numer = mv_lookup_evals(table, evals_ptr, quotient_eval_numer, y);
+                //         }
+                //     },
+                //     0x1 => {
+                //         // mstore(add(0xA0, vka_end), mload(add(theta_mptr, 0x40)))
+                //         memory[vka_end..vka_end + 0xa0].copy_from_slice(mload(memory, theta_mptr + 0x40)); // gamma
+                //         while evals_ptr < end_ptr {
+                //             evals_ptr, table, quotient_eval_numer = lookup_evals(table, evals_ptr, quotient_eval_numer, y);
+                //         }
+                //     },
+                //     _ => { return Err(VerifyError::KeyError { message: format!("Unsupported value for mv. Got: {mv}") }); }
+                // }
+            }
+        }
+
+        // mstore(add(theta_mptr, 0x240), mulmod(quotient_eval_numer, mload(add(theta_mptr, 0x1a0)), R))
+        let idx = theta_mptr + 0x240;
+        let val = quotient_eval_numer * mload(memory, theta_mptr as u32 + 0x1a0).unwrap().into_fr();
+        memory[idx..(idx + 0x20)].copy_from_slice(&val.into_be_bytes32());
+
+        println!(
+            "Writing: {} at 0x{:x?}",
+            to_hex_string(&val.into_be_bytes32()),
+            idx
+        );
     }
+
+    // Compute quotient commitment
+    {
+        println!("=================================================================");
+        println!("\t\t Compute Quotient Commitment \t\t");
+        println!("=================================================================");
+
+        let first_quotient_x_cptr = 0x0320 + VKA_OFFSET + 5 * 0x20; // 0x3c0
+        let last_quotient_x_cptr = 0x0300 + VKA_OFFSET + 5 * 0x20; // 0x03a0
+        let bytes = calldataload(
+            raw_proof,
+            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap())
+                - PROOF_OFFSET as u32,
+        )
+        .unwrap();
+        // mstore(vka_end, calldataload(mload(0x03a0)))
+        memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
+
+        println!("Just wrote: {} at 0x{:x?}", to_hex_string(&bytes), vka_end);
+
+        // mstore(add(0x20, vka_end), calldataload(add(mload(0x03a0), 0x20)))
+        let bytes = calldataload(
+            raw_proof,
+            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap()) + 0x20
+                - PROOF_OFFSET as u32,
+        )
+        .unwrap();
+        memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
+
+        println!("Just wrote: {} at 0x{:x?}", to_hex_string(&bytes), vka_end);
+
+        let x_n = mload(memory, theta_mptr as u32 + 0x180).unwrap().into_fr();
+
+        println!("x_n = {}", to_hex_string(&x_n.into_be_bytes32()));
+
+        // CORRECT UP TO THIS POINT...
+
+        // for
+        //     {
+        //         let cptr := sub(mload(0x03a0), 0x40)
+        //         let cptr_end := sub(mload(0x03c0), 0x40)
+        //     }
+        //     lt(cptr_end, cptr)
+        //     {}
+        // {
+        let mut cptr =
+            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap()) - 0x40;
+        let cptr_end =
+            u32_from_be_tail(&mload(memory, first_quotient_x_cptr as u32).unwrap()) - 0x40;
+        while cptr_end < cptr {
+            ec_mul_acc::<H>(memory, &x_n).map_err(|_| VerifyError::OtherError)?; // TODO: Replace with better Error variant
+
+            println!("Now reading point at 0x{:x?}...", cptr);
+
+            let x = Fq::from_be_bytes_mod_order(
+                // TODO: DOUBLE-CHECK FOR CORRECTNESS
+                &calldataload(raw_proof, cptr - PROOF_OFFSET as u32).unwrap(),
+            );
+            let y = Fq::from_be_bytes_mod_order(
+                // TODO: DOUBLE-CHECK FOR CORRECTNESS
+                &calldataload(raw_proof, cptr + 0x20 - PROOF_OFFSET as u32).unwrap(),
+            );
+            ec_add_acc::<H>(memory, &x, &y).map_err(|_| VerifyError::OtherError)?; // TODO: Replace with better Error variant
+            cptr -= 0x40;
+        }
+        // mstore(add(theta_mptr, 0x260), mload(vka_end))
+        let bytes = mload(memory, vka_end as u32).unwrap();
+        memory[(theta_mptr + 0x260)..(theta_mptr + 0x260 + 0x20)].copy_from_slice(&bytes);
+
+        println!(
+            "Wrote: {} at 0x{:x?}",
+            to_hex_string(&bytes),
+            theta_mptr + 0x260
+        );
+
+        // mstore(add(theta_mptr, 0x280), mload(add(0x20, vka_end)))
+        let bytes = mload(&memory, vka_end as u32 + 0x20).unwrap();
+        memory[(theta_mptr + 0x280)..(theta_mptr + 0x280 + 0x20)].copy_from_slice(&bytes);
+
+        println!(
+            "Wrote: {} at 0x{:x?}",
+            to_hex_string(&bytes),
+            theta_mptr + 0x280
+        );
+    }
+
+    // Compute pairing lhs and rhs
+    // {
+    //     // point_computations
+    //     let pcs_ptr := u32_from_be_tail(&mload(memory, 0x03a0 + VKA_OFFSET + 5 * 0x20).unwrap()); // 0x0440
+    //     {
+    //         let point_computations := mload(pcs_ptr)
+    //         let x := mload(add(theta_mptr, 0x80))
+    //         let omega := mload(0x0180)
+    //         let omega_inv := mload(0x01a0)
+    //         let x_pow_of_omega := mulmod(x, omega, R)
+    //         x_pow_of_omega, pcs_ptr := point_rots(point_computations, pcs_ptr, 8, x_pow_of_omega, omega, vka_end)
+    //         pcs_ptr := add(pcs_ptr, 0x20)
+    //         point_computations := mload(pcs_ptr)
+    //         // Store interm point
+    //         mstore(add(and(point_computations, PTR_BITMASK), vka_end), x)
+    //         x_pow_of_omega := mulmod(x, omega_inv, R)
+    //         point_computations := shr(16, point_computations)
+    //         x_pow_of_omega, pcs_ptr := point_rots(point_computations, pcs_ptr, 24, x_pow_of_omega, omega_inv, vka_end)
+    //         pcs_ptr := add(pcs_ptr, 0x20)
+    //         pop(x_pow_of_omega)
+    //     }
+    // }
 
     Ok(())
 }
@@ -1077,7 +1242,7 @@ fn z_evals(
     println!("num_words = 0x{:x?}", num_words);
 
     let mut quotient_eval_numer = quotient_eval_numer;
-    let mut z = z;
+    let mut z = z.clone();
     let mut permutation_z_evals_ptr = permutation_z_evals_ptr;
 
     println!(
@@ -1091,7 +1256,7 @@ fn z_evals(
     let ptr = u32_from_be_tail(&mload(memory, 0x40).unwrap());
     let idx = ptr as usize + 0x20;
     let val = ptr + 0x40;
-    memory[idx..idx + 0x20].copy_from_slice(&val.into_u256().into_be_bytes32()); // TODO: DOUBLE-CHECK FOR CORRECTNESS!!!
+    memory[idx..idx + 0x20].copy_from_slice(&val.into_u256().into_be_bytes32());
 
     println!(
         "Writing {} at 0x{:x?}",
@@ -1118,6 +1283,8 @@ fn z_evals(
             .unwrap()
             .into_fr();
 
+        println!("lhs = {}", to_hex_string(&lhs.into_be_bytes32()));
+
         // let idx2 = lsb16(&(z >> 32));
         // let slice2 = raw_proof.get(idx2..idx2 + 0x20).unwrap();
         // let rhs_bytes: [u8; 32] = slice2.try_into().unwrap();
@@ -1125,6 +1292,8 @@ fn z_evals(
         let rhs = calldataload(raw_proof, (lsb16(&(z >> 32)) - PROOF_OFFSET) as u32)
             .unwrap()
             .into_fr();
+
+        println!("rhs = {}", to_hex_string(&rhs.into_be_bytes32()));
 
         // let temp = lhs - rhs;
         quotient_eval_numer = quotient_eval_numer * y + l_0 * (lhs - rhs);
@@ -1144,10 +1313,21 @@ fn z_evals(
         );
         permutation_z_evals_ptr = next_z_ptr;
         z = z_j;
+
+        println!("permutation_z_evals_ptr = 0x{:x?}", permutation_z_evals_ptr);
+        println!("z = {}", to_hex_string(&z.into_be_bytes32()));
     }
+
+    println!("===============================================================================");
+    println!("EXIT LOOP!!!");
+    println!("===============================================================================");
+
     // Due to the fact that permutation_columns.len() in H2 might not be divisible by permutation_chunk_len, the last column length might be less than permutation_chunk_len
     // We store this length in the last 16 bits of the num_words_packed word.
     num_words = lsb16(&(*num_words_packed >> 16));
+
+    println!("num_words = 0x{:x?}", num_words);
+
     col_evals(
         memory,
         raw_proof,
@@ -1156,14 +1336,19 @@ fn z_evals(
         permutation_z_evals_ptr,
         theta_mptr,
     );
+
     // iterate through col_evals to update the quotient_eval_numer accumulator
     let temp = u32_from_be_tail(&mload(memory, 0x40).unwrap()) + 0x20;
     let end_ptr = u32_from_be_tail(&mload(memory, temp).unwrap()) as usize;
-    // for { let j := add(mload(0x40), 0x40) } lt(j, end_ptr) { j := add(j, 0x20) } {
     let start = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize + 0x40;
     for j in (start..end_ptr).step_by(0x20) {
         quotient_eval_numer = quotient_eval_numer * y + mload(memory, j as u32).unwrap().into_fr();
     }
+
+    println!(
+        "Return quotient_eval_numer = {}",
+        to_hex_string(&quotient_eval_numer.into_be_bytes32())
+    );
 
     quotient_eval_numer
 }
@@ -1183,10 +1368,18 @@ fn col_evals(
     let mut z = z;
     let gamma = mload(memory, theta_mptr as u32 + 0x40).unwrap().into_fr();
     let beta = mload(memory, theta_mptr as u32 + 0x20).unwrap().into_fr();
-    let x = mload(memory, theta_mptr as u32 + 0x80).unwrap().into_fr();
+    // let x = mload(memory, theta_mptr as u32 + 0x80).unwrap().into_fr();
     let l_last = mload(memory, theta_mptr as u32 + 0x1c0).unwrap().into_fr();
     let l_blind = mload(memory, theta_mptr as u32 + 0x1e0).unwrap().into_fr();
     let i_eval = mload(memory, theta_mptr as u32 + 0x220).unwrap().into_fr();
+
+    println!("gamma = {}", to_hex_string(&gamma.into_be_bytes32()));
+    println!("beta = {}", to_hex_string(&beta.into_be_bytes32()));
+    // println!("x = {}", to_hex_string(&x.into_be_bytes32()));
+    println!("l_last = {}", to_hex_string(&l_last.into_be_bytes32()));
+    println!("l_blind = {}", to_hex_string(&l_blind.into_be_bytes32()));
+    println!("i_eval = {}", to_hex_string(&i_eval.into_be_bytes32()));
+
     // Extract the index 1 and index 0 z evaluations from the z word.
     // let idx1 = lsb16(&(z >> 16));
     // let lhs_slice = raw_proof.get(idx1..idx1 + 0x20).unwrap();
@@ -1214,20 +1407,32 @@ fn col_evals(
         // for { } z { } {
         while !z.is_zero() {
             let mut eval = i_eval;
+
             if lsb8(&z) == 0x00 {
-                let idx = lsb16(&(z >> 8));
-                let slice = raw_proof.get(idx..idx + 0x20).unwrap();
-                let eval_bytes: [u8; 32] = slice.try_into().unwrap();
-                eval = eval_bytes.into_fr();
+                // let idx = lsb16(&(z >> 8));
+                // let slice = raw_proof.get(idx..idx + 0x20).unwrap();
+                // let eval_bytes: [u8; 32] = slice.try_into().unwrap();
+                // eval = eval_bytes.into_fr();
+                eval = calldataload(raw_proof, (lsb16(&(z >> 8)) - PROOF_OFFSET) as u32)
+                    .unwrap()
+                    .into_fr();
+                println!("[IF] eval = {}", to_hex_string(&eval.into_be_bytes32()));
             }
+
+            println!("z is now: {}", to_hex_string(&z.into_be_bytes32()),);
+            println!("eval is now: {}", to_hex_string(&eval.into_be_bytes32()));
+
             // lhs := mulmod(lhs, addmod(addmod(eval, mulmod(beta, calldataload(and(shr(24, z), PTR_BITMASK)), R), R), gamma, R), R)
             lhs = lhs
                 * (eval
                     + beta
-                        * calldataload(raw_proof, lsb16(&(z >> 24)) as u32)
+                        * calldataload(raw_proof, (lsb16(&(z >> 24)) - PROOF_OFFSET) as u32)
                             .unwrap()
                             .into_fr()
                     + gamma);
+
+            println!("LHS = {}", to_hex_string(&lhs.into_be_bytes32()));
+
             // rhs := mulmod(rhs, addmod(addmod(eval, mload(mload(0x40)), R), gamma, R), R)
             rhs = rhs
                 * (eval
@@ -1235,7 +1440,14 @@ fn col_evals(
                         .unwrap()
                         .into_fr()
                     + gamma);
+
+            println!("RHS = {}", to_hex_string(&rhs.into_be_bytes32()));
+
             z >>= 40;
+
+            println!("Right shifting z...");
+            println!("z is now: {}", to_hex_string(&z.into_be_bytes32()));
+
             // mstore(mload(0x40), mulmod(mload(mload(0x40)), DELTA, R))
             let idx = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
             let val = DELTA
@@ -1243,12 +1455,26 @@ fn col_evals(
                     .unwrap()
                     .into_fr();
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+            println!(
+                "Storing {} at 0x{:x?}",
+                to_hex_string(&val.into_be_bytes32()),
+                idx
+            );
         }
         z = mload(memory, (permutation_z_evals_ptr + j + 0x20) as u32)
             .unwrap()
             .into_u256();
+
+        println!("Loaded {} into z", to_hex_string(&z.into_be_bytes32()));
     }
     let left_sub_right = lhs - rhs;
+
+    println!(
+        "left_sub_right = {}",
+        to_hex_string(&left_sub_right.into_be_bytes32())
+    );
+
     let fsm_ptr = u32_from_be_tail(
         &mload(
             memory,
@@ -1256,10 +1482,329 @@ fn col_evals(
         )
         .unwrap(),
     ) as usize;
+
+    println!("fsm_ptr = 0x{:x?}", fsm_ptr);
+
     let val = left_sub_right - left_sub_right * (l_last + l_blind);
     memory[fsm_ptr..fsm_ptr + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+    println!(
+        "Storing: {} at 0x{:x?}",
+        to_hex_string(&val.into_be_bytes32()),
+        fsm_ptr
+    );
+
     let idx = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize + 0x20;
     memory[idx..idx + 0x20].copy_from_slice(&(fsm_ptr + 0x20).into_u256().into_be_bytes32());
+
+    println!(
+        "Storing: {} at 0x{:x?}",
+        to_hex_string(&(fsm_ptr + 0x20).into_u256().into_be_bytes32()),
+        idx
+    );
+}
+
+// TODO: Re-assess types of ret0, ret1, ret2; also for expression_evals_packed
+// fn lookup_expr_evals_packed(fsmp, code_ptr, expressions_word, mv) -> Result<(usize, U256, Fr), ()> {
+//     // expression evaluation.
+//     let (ret0, ret1, ret2: Fr) = expression_evals_packed(memory, raw_proof, fsmp, code_ptr, expressions_word)?;
+//     if mv != 0 {
+//         // add the beta accum addmod if mv lookup
+//         ret2 = addmod(ret2, mload(memory, (u32_from_be_tail(mload(memory, 0x40).unwrap()) + 0x80)), R)
+//     }
+// }
+
+// fn mv_lookup_evals(memory: &mut [u8], raw_proof: &[u8], table: U256, mut evals_ptr: usize, quotient_eval_numer: Fr, y: Fr) -> ret0, ret1, ret2 {
+//     // iterate through the input_tables_len
+//     let evals = mload(memory, evals_ptr as u32).unwrap().into_be_bytes32();
+//     // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
+//     let new_table = lsb8(&evals);
+//     evals >>= 8;
+//     let phi = lsb16(evals);
+//     let tmp = calldataload(raw_proof, phi as u32 - PROOF_OFFSET);
+//     // quotient_eval_numer := addmod(
+//     //     mulmod(quotient_eval_numer * y, R),
+//     //     mulmod(mload(add(0x20, mload(0x40))), calldataload(phi), R),
+//     //     R
+//     // )
+//     quotient_eval_numer = quotient_eval_numer * y
+//         + mload(memory, 0x20 + u32_from_be_tail(mload(memory, 0x40).unwrap())).unwrap().into_fr() * tmp;
+//     // quotient_eval_numer := addmod(
+//     //     mulmod(quotient_eval_numer, y, R),
+//     //     mulmod(mload(mload(memory, 0x40).unwrap), tmp, R),
+//     //     R
+//     // )
+//     quotient_eval_numer = quotient_eval_numer * y
+//         + mload(memory, u32_from_be_tail(mload(memory, 0x40).unwrap())).unwrap().into_fr() * tmp;
+//     // load in the lookup_table_lines from the evals_ptr
+//     evals_ptr += 0x20;
+//     // Due to the fact that lookups can share the previous table, we can cache it for reuse.
+//     let input_expression = mload(memory, evals_ptr as u32).unwrap();
+//     if new_table != 0 {
+//         evals_ptr, input_expression, table = lookup_expr_evals_packed(add(0xa0, mload(0x40)), evals_ptr, mload(evals_ptr), 0x1)
+//     }
+//     // outer inputs len, stored in the first input expression word
+//     let outer_inputs_len := and(input_expression, PTR_BITMASK)
+//     input_expression := shr(16, input_expression)
+//     // shift up the inputs iterator by the free static memory offset of 0xa0
+//     for { let j := add(0xa0, mload(0x40)) } lt(j, add(outer_inputs_len, add(0xa0, mload(0x40)))) { j := add(j, 0x20) } {
+//         // call the expression_evals function to evaluate the input_lines
+//         let ident
+//         evals_ptr, input_expression, ident := lookup_expr_evals_packed(j, evals_ptr, input_expression, 0x1)
+//         // store ident in free static memory
+//         mstore(j, ident)
+//     }
+//     let lhs
+//     let rhs
+//     switch eq(outer_inputs_len, 0x20)
+//     case 1 {
+//         rhs := table
+//     } default {
+//         // iterate through the outer_inputs_len
+//         let last_idx := sub(outer_inputs_len, 0x20)
+//         for { let i := 0 } lt(i, outer_inputs_len) { i := add(i, 0x20) } {
+//             let tmp := mload(add(0xa0, mload(0x40)))
+//             let j := 0x20
+//             if eq(i, 0){
+//                 tmp := mload(add(0xc0, mload(0x40)))
+//                 j := 0x40
+//             }
+//             for { } lt(j, outer_inputs_len) { j := add(j, 0x20) } {
+//                 if eq(i, j) {
+//                     continue
+//                 }
+//                 tmp := mulmod(tmp, mload(add(j, add(0xa0, mload(0x40)))), R)
+
+//             }
+//             rhs := addmod(rhs, tmp, R)
+//             if eq(i, last_idx) {
+//                 rhs := mulmod(rhs, table, R)
+//             }
+//         }
+//     }
+//     let tmp := mload(add(0xa0, mload(0x40)))
+//     for { let j := 0x20 } lt(j, outer_inputs_len) { j := add(j, 0x20) } {
+//         tmp := mulmod(tmp, mload(add(j, add(0xa0, mload(0x40)))), R)
+//     }
+//     rhs := addmod(
+//         rhs,
+//         sub(R, mulmod(calldataload(and(shr(32, evals), PTR_BITMASK)), tmp, R)),
+//         R
+//     )
+//     lhs := mulmod(
+//         mulmod(table, tmp, R),
+//         addmod(calldataload(and(shr(16, evals), PTR_BITMASK)), sub(R, calldataload(phi)), R),
+//         R
+//     )
+//     quotient_eval_numer := addmod(
+//         mulmod(quotient_eval_numer, y, R),
+//         mulmod(
+//             addmod(
+//                 1,
+//                 sub(R, addmod(mload(add(0x40, mload(0x40))), mload(mload(0x40)), R)),
+//                 R
+//             ),
+//             addmod(lhs, sub(R, rhs), R),
+//             R
+//         ),
+//         R
+//     )
+//     ret0 := evals_ptr
+//     ret1 := table
+//     ret2 := quotient_eval_numer
+// }
+
+// function lookup_evals(table, evals_ptr, quotient_eval_numer, y) -> ret0, ret1, ret2 {
+//     // iterate through the input_tables_len
+//     let evals := mload(evals_ptr)
+//     // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
+//     let new_table := and(evals, BYTE_FLAG_BITMASK)
+//     evals := shr(8, evals)
+//     let z := and(evals, PTR_BITMASK)
+//     evals := shr(16, evals)
+//     quotient_eval_numer := addmod(
+//         mulmod(quotient_eval_numer, y, R),
+//         addmod(
+//             mload(add(0x20, mload(0x40))),
+//             mulmod(
+//                 mload(add(0x20, mload(0x40))),
+//                 sub(R, calldataload(z)),
+//                 R
+//             ),
+//             R
+//         ),
+//         R
+//     )
+//     quotient_eval_numer := addmod(
+//         mulmod(quotient_eval_numer, y, R),
+//         mulmod(
+//             mload(mload(0x40)),
+//             addmod(
+//                 mulmod(calldataload(z), calldataload(z), R),
+//                 sub(R, calldataload(z)),
+//                 R
+//             ),
+//             R
+//         ),
+//         R
+//     )
+//     // load in the lookup_table_lines from the evals_ptr
+//     evals_ptr := add(evals_ptr, 0x20)
+//     // Due to the fact that lookups can share the previous table, we can cache it for reuse.
+//     let input_expression := mload(evals_ptr)
+//     if new_table {
+//         evals_ptr, input_expression, table := lookup_expr_evals_packed(add(0xc0, mload(0x40)), evals_ptr, mload(evals_ptr), 0x0)
+//     }
+//     // call the expression_evals function to evaluate the input_lines
+//     let input
+//     evals_ptr, input_expression, input := lookup_expr_evals_packed(add(0xc0, mload(0x40)), evals_ptr, input_expression, 0x0)
+//     let p_input := and(shr(16, evals), PTR_BITMASK)
+//     let p_table := and(shr(48, evals), PTR_BITMASK)
+//     quotient_eval_numer := addmod(
+//         mulmod(quotient_eval_numer, y, R),
+//         mulmod(
+//             addmod(
+//                 1,
+//                 sub(R, addmod(mload(add(0x40, mload(0x40))), mload(mload(0x40)), R)),
+//                 R
+//             ),
+//             addmod(
+//                 mulmod(
+//                     calldataload(and(evals, PTR_BITMASK)),
+//                     mulmod(
+//                         addmod(calldataload(p_input), mload(add(0x80, mload(0x40))), R),
+//                         addmod(calldataload(p_table), mload(add(0xa0, mload(0x40))), R),
+//                         R
+//                     ),
+//                     R
+//                 ),
+//                 sub(
+//                     R,
+//                     mulmod(
+//                         calldataload(z),
+//                         mulmod(addmod(input, mload(add(0x80, mload(0x40))), R), addmod(table, mload(add(0xa0, mload(0x40))), R), R),
+//                         R
+//                     )
+//                 ),
+//                 R
+//             ),
+//             R
+//         ),
+//         R
+//     )
+//     quotient_eval_numer := addmod(
+//         mulmod(quotient_eval_numer, y, R),
+//         mulmod(mload(add(0x20, mload(0x40))), addmod(calldataload(p_input), sub(R, calldataload(p_table)), R), R),
+//         R
+//     )
+//     quotient_eval_numer := addmod(
+//         mulmod(quotient_eval_numer, y, R),
+//         mulmod(
+//             addmod(
+//                 1,
+//                 sub(R, addmod(mload(add(0x40, mload(0x40))), mload(mload(0x40)), R)), R),
+//                 mulmod(
+//                     addmod(calldataload(p_input), sub(R, calldataload(p_table)), R),
+//                     addmod(calldataload(p_input), sub(R, calldataload(and(shr(32, evals), PTR_BITMASK))), R),
+//                     R
+//                 ),
+//             R
+//         ),
+//         R
+//     )
+//     ret0 := evals_ptr
+//     ret1 := table
+//     ret2 := quotient_eval_numer
+// }
+
+// Scale point at (0x00, 0x20) by scalar.
+fn ec_mul_acc<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
+    println!("\nec_mul_acc invoked:");
+
+    let vka_end = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let point = read_g1::<H>(&memory, vka_end as usize)
+        .unwrap()
+        .into_group(); // This might be incorrect...
+
+    println!("Scalar = {}", to_hex_string(&scalar.into_be_bytes32()));
+
+    println!("point.x = {}", to_hex_string(&point.x.into_be_bytes32()));
+    println!("point.y = {}", to_hex_string(&point.y.into_be_bytes32()));
+
+    let res = (point * scalar).into_affine();
+    // mstore(add(0x40, vka_end), scalar)
+    // ret := and(success, staticcall(gas(), 0x07, vka_end, 0x60, vka_end, 0x40))
+    let vka_end = vka_end as usize;
+    memory[vka_end..vka_end + 0x20]
+        .copy_from_slice(&res.x().expect("Should succeed").into_be_bytes32());
+    memory[(vka_end + 0x20)..(vka_end + 0x40)]
+        .copy_from_slice(&res.y().expect("Should succeed").into_be_bytes32());
+
+    println!("Scalar Product:");
+    println!(
+        "res.x = {} written at 0x{:x?}",
+        to_hex_string(&res.x.into_be_bytes32()),
+        vka_end
+    );
+    println!(
+        "res.y = {} written at 0x{:x?}",
+        to_hex_string(&res.y.into_be_bytes32()),
+        vka_end + 0x20
+    );
+
+    Ok(())
+}
+
+// Add (x, y) into point at (0x00, 0x20).
+// Return updated (success).
+fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()> {
+    println!("\nec_add_acc invoked:");
+
+    let vka_end = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    // mstore(add(0x40, vka_end), x)
+    // mstore(add(0x60, vka_end), y)
+    // ret := and(success, staticcall(gas(), 0x06, vka_end, 0x80, vka_end, 0x40))
+
+    println!("G1 Point at vka_end = 0x{:x?}", vka_end);
+    let point1 = read_g1::<H>(&memory, vka_end as usize)
+        .unwrap()
+        .into_group(); // This might be incorrect...
+
+    println!("point1.x = {}", to_hex_string(&point1.x.into_be_bytes32()));
+    println!("point1.y = {}", to_hex_string(&point1.y.into_be_bytes32()));
+
+    let point2 = G1::<H>::new_unchecked(*x, *y);
+
+    println!("Other G1 point:");
+    println!("point2.x = {}", to_hex_string(&point2.x.into_be_bytes32()));
+    println!("point2.y = {}", to_hex_string(&point2.y.into_be_bytes32()));
+
+    // Validate point
+    if !point2.is_on_curve() {
+        return Err(());
+    }
+
+    let res = (point1 + point2).into_affine();
+
+    let vka_end = vka_end as usize;
+    memory[vka_end..vka_end + 0x20]
+        .copy_from_slice(&res.x().expect("Should succeed").into_be_bytes32());
+    memory[(vka_end + 0x20)..(vka_end + 0x40)]
+        .copy_from_slice(&res.y().expect("Should succeed").into_be_bytes32());
+
+    println!("Sum of points:");
+    println!(
+        "res.x = {} written at 0x{:x?}",
+        to_hex_string(&res.x.into_be_bytes32()),
+        vka_end
+    );
+    println!(
+        "res.y = {} written at 0x{:x?}",
+        to_hex_string(&res.y.into_be_bytes32()),
+        vka_end + 0x20
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
