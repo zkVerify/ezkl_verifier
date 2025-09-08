@@ -1047,22 +1047,135 @@ fn verify_proof_inner<H: CurveHooks>(
             }
         }
         // coeff_computations
-        // {
-        //     let coeff_len_data := mload(pcs_ptr)
-        //     // Load in the least significant byte of the `coeff_len_data` word to get the total number of words we will need to load in
-        //     // that contains the packed Vec<set.rots().len()>.
-        //     let end_ptr_packed_lens := add(pcs_ptr, mul(0x20, and(coeff_len_data, BYTE_FLAG_BITMASK)))
-        //     coeff_len_data := shr(8, coeff_len_data)
-        //     let i := pcs_ptr
-        //     pcs_ptr := end_ptr_packed_lens
-        //     for {  } lt(i, end_ptr_packed_lens) { i := add(i, 0x20) } {
-        //         for {  } coeff_len_data { } {
-        //             coeff_len_data := coeff_computations(coeff_len_data, mload(pcs_ptr))
-        //             pcs_ptr := add(pcs_ptr, 0x20)
-        //         }
-        //         coeff_len_data := mload(add(i, 0x20))
-        //     }
-        // }
+        {
+            let mut coeff_len_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            // Load in the least significant byte of the `coeff_len_data` word to get the total number
+            // of words we will need to load in that contains the packed Vec<set.rots().len()>.
+            let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&coeff_len_data);
+            coeff_len_data >>= 8;
+            let mut pcs_ptr = end_ptr_packed_lens;
+            // for {  } lt(i, end_ptr_packed_lens) { i := add(i, 0x20) } {
+            for i in (pcs_ptr..end_ptr_packed_lens).step_by(0x20) {
+                // for {  } coeff_len_data { } {
+                while !coeff_len_data.is_zero() {
+                    let coeff_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+                    coeff_len_data = coeff_computations(memory, coeff_len_data, coeff_data);
+                    pcs_ptr += 0x20;
+                }
+                coeff_len_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+            }
+        }
+        // normalized_coeff_computations
+        {
+            let mut norm_coeff_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            // success := batch_invert(success, vka_end, add(and(norm_coeff_data, PTR_BITMASK), vka_end))\
+            let mut inverses = (vka_end..(vka_end + lsb16(&norm_coeff_data)))
+                .step_by(0x20)
+                .map(|p| mload(memory, p as u32).unwrap().into_fr())
+                .collect::<Vec<_>>();
+            ark_ff::fields::batch_inversion(&mut inverses);
+            for i in 0..inverses.len() {
+                memory[(vka_end + i * 0x20)..vka_end + (i + 1) * 0x20]
+                    .copy_from_slice(&inverses[i].into_be_bytes32());
+            }
+
+            norm_coeff_data >>= 16;
+            let diff_0_inv = mload(memory, vka_end as u32).unwrap().into_fr();
+            let mptr0 = lsb16(&norm_coeff_data) + vka_end;
+            norm_coeff_data >>= 16;
+            // mstore(mptr0, diff_0_inv)
+            memory[mptr0..mptr0 + 0x20].copy_from_slice(&diff_0_inv.into_be_bytes32());
+            // for
+            //     {
+            //         let mptr = mptr0 + 0x20;
+            //         let mptr_end := add(mptr0, and(norm_coeff_data, PTR_BITMASK))
+            //     }
+            //     lt(mptr, mptr_end)
+            //     { mptr += 0x20; }
+            let mptr_end = mptr0 + lsb16(&norm_coeff_data);
+            for mptr in ((mptr0 + 0x20)..mptr_end).step_by(0x20) {
+                // mstore(mptr, mulmod(mload(mptr), diff_0_inv, R))
+                let val = mload(memory, mptr as u32).unwrap().into_fr() * diff_0_inv;
+                memory[mptr..mptr + 0x20].copy_from_slice(&val.into_be_bytes32());
+            }
+            pcs_ptr += 0x20;
+        }
+        let mut coeff_ptr = vka_end + 0x20;
+        // r_evals_computations
+        {
+            let mut r_evals_meta_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&r_evals_meta_data);
+            r_evals_meta_data >>= 8;
+            let mut set_coeff = lsb16(&r_evals_meta_data) + vka_end;
+            r_evals_meta_data >>= 16;
+            let mut r_eval_mptr = lsb16(&r_evals_meta_data) + vka_end;
+            r_evals_meta_data >>= 16;
+            let mut i = pcs_ptr;
+            pcs_ptr = end_ptr_packed_lens;
+            let zeta = mload(memory, theta_mptr as u32 + 0xA0).unwrap().into_fr();
+            let quotient_eval = mload(memory, theta_mptr as u32 + 0x240).unwrap().into_fr();
+            let mut not_first = false; // TODO: DOUBLE-CHECK INITIALIZATION IN CASE RESULTS ARE INCORRECT...
+            let mut r_eval: Fr;
+            // for {  } lt(i, end_ptr_packed_lens) { i := add(i, 0x20) } {
+            while i < end_ptr_packed_lens {
+                // for {  } r_evals_meta_data { } {
+                while !r_evals_meta_data.is_zero() {
+                    (r_eval, pcs_ptr) = r_evals_computation(
+                        memory,
+                        raw_proof,
+                        lsb8(&r_evals_meta_data) as u32,
+                        pcs_ptr as u32,
+                        zeta,
+                        quotient_eval,
+                        coeff_ptr as u32,
+                    )
+                    .map_err(|_| VerifyError::OtherError)?; // TODO: REVISIT WHEN DOING ERROR HANDLING...
+                    coeff_ptr = coeff_ptr + lsb8(&r_evals_meta_data);
+                    r_evals_meta_data >>= 8;
+                    if not_first {
+                        r_eval *= mload(memory, set_coeff as u32).unwrap().into_fr();
+                        set_coeff += 0x20;
+                    }
+                    not_first = true;
+                    // mstore(r_eval_mptr, r_eval)
+                    memory[r_eval_mptr..r_eval_mptr + 0x20]
+                        .copy_from_slice(&r_eval.into_be_bytes32());
+                    r_eval_mptr += 0x20;
+                }
+                r_evals_meta_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+                i += 0x20;
+            }
+        }
+        // coeff_sums_computation
+        {
+            let mut coeff_sums_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&coeff_sums_data);
+            coeff_sums_data >>= 8;
+            coeff_ptr = vka_end + 0x20;
+            // let i := pcs_ptr
+            // pcs_ptr := end_ptr_packed_lens
+            // for {  } lt(i, end_ptr_packed_lens) { i := add(i, 0x20) } {
+            for i in (pcs_ptr..end_ptr_packed_lens).step_by(0x20) {
+                // for {  } coeff_sums_data { } {
+                while !coeff_sums_data.is_zero() {
+                    let mut sum = mload(memory, coeff_ptr as u32).unwrap().into_fr();
+                    let len = lsb8(&coeff_sums_data);
+                    coeff_sums_data >>= 8;
+                    // for { let j := 0x20 } lt(j, len) { j := add(j, 0x20) } {
+                    for j in (0x20..len).step_by(0x20) {
+                        sum += mload(memory, (coeff_ptr + j) as u32).unwrap().into_fr(); // TODO: DOUBLE-CHECK: (coeff_ptr + j) as u32 fits into a `u32`
+                    }
+                    coeff_ptr += len;
+                    let idx = lsb16(&coeff_sums_data) + vka_end;
+                    // mstore(idx, sum)
+                    memory[idx..idx + 0x20].copy_from_slice(&sum.into_be_bytes32());
+                    coeff_sums_data >>= 16;
+                }
+                coeff_sums_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+            }
+        }
+        // r_eval_computation
+        {}
     }
 
     Ok(())
@@ -2032,6 +2145,225 @@ fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
     );
 
     Ok(())
+}
+
+fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256) -> U256 {
+    let coeff_len = lsb8(&coeff_len_data);
+    let ret = coeff_len_data >> 8;
+    match coeff_len {
+        0x01 => {
+            // We only encode the points if the coeff length is greater than 1.
+            // Otherwise we just encode the mu_minus_point and coeff ptr.
+            // mstore(add(and(shr(16, coeff_data), PTR_BITMASK), mload(0x40)), mod(mload(add(and(coeff_data, PTR_BITMASK), mload(0x40))), R))
+            let idx = lsb16(&(coeff_data >> 16))
+                + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
+            let val = mload(
+                memory,
+                lsb16(&coeff_data) as u32 + u32_from_be_tail(&mload(memory, 0x40).unwrap()),
+            )
+            .unwrap()
+            .into_fr();
+            memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
+        }
+        _ => {
+            let mut coeff = Fr::ONE;
+            let offset_aggr = coeff_len * 16;
+            // for { let i := 0 } lt(i, coeff_len) { i := add(i, 1) } {
+            for i in 0..coeff_len {
+                let mut first: usize = 0x01;
+                let mut offset_base = i as u32 * 16;
+                let idx = lsb16(&(coeff_data >> offset_base)) as u32
+                    + u32_from_be_tail(&mload(memory, 0x40).unwrap());
+                let point_i = mload(memory, idx).unwrap().into_fr();
+                // for { let j:= 0 } lt(j, coeff_len) { j := add(j, 1) } {
+                for j in 0..coeff_len {
+                    if j == i {
+                        continue;
+                    }
+                    if first != 0 {
+                        coeff = point_i
+                            - mload(
+                                memory,
+                                lsb16(&(coeff_data >> (16 * j as u32))) as u32
+                                    + u32_from_be_tail(&mload(memory, 0x40).unwrap()),
+                            )
+                            .unwrap()
+                            .into_fr();
+                        first = 0;
+                        continue;
+                    }
+                    coeff = coeff
+                        * (point_i
+                            - mload(
+                                memory,
+                                lsb16(&(coeff_data >> (16 * j as u32))) as u32
+                                    + u32_from_be_tail(&mload(memory, 0x40).unwrap()),
+                            )
+                            .unwrap()
+                            .into_fr());
+                }
+                offset_base += offset_aggr as u32;
+                coeff = coeff
+                    * mload(
+                        memory,
+                        lsb16(&(coeff_data >> offset_base)) as u32
+                            + u32_from_be_tail(&mload(memory, 0x40).unwrap()),
+                    )
+                    .unwrap()
+                    .into_fr();
+                offset_base += offset_aggr as u32;
+                let idx = lsb16(&(coeff_data >> offset_base))
+                    + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
+                memory[idx..idx + 0x20].copy_from_slice(&coeff.into_be_bytes32());
+            }
+        }
+    }
+    ret
+}
+
+// TODO: DO PROPER ERROR HANDLING...
+fn r_evals_computation(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    rot_len: u32,
+    r_evals_data_ptr: u32,
+    zeta: Fr,
+    quotient_eval: Fr,
+    coeff_ptr: u32,
+) -> Result<(Fr, usize), ()> {
+    let mut r_evals_data = mload(memory, r_evals_data_ptr).unwrap().into_u256();
+    // number of words to encode the data needed for this set in the r_evals computation.
+    let num_words = lsb8(&r_evals_data) as u32;
+    r_evals_data >>= 8;
+    match rot_len {
+        0x20 => {
+            let (ret0, ret1) = single_rot_set(
+                memory,
+                raw_proof,
+                r_evals_data,
+                r_evals_data_ptr,
+                num_words,
+                zeta,
+                quotient_eval,
+                coeff_ptr,
+            )
+            .map_err(|_| ())?;
+            Ok((ret0, ret1))
+        }
+        _ => {
+            let (ret0, ret1) = multi_rot_set(
+                memory,
+                raw_proof,
+                r_evals_data,
+                r_evals_data_ptr,
+                num_words,
+                rot_len,
+                zeta,
+                coeff_ptr,
+            )
+            .map_err(|_| ())?;
+            Ok((ret0, ret1))
+        }
+    }
+}
+
+fn single_rot_set(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    mut r_evals_data: U256,
+    mut ptr: u32,
+    num_words: u32,
+    zeta: Fr,
+    quotient_eval: Fr,
+    coeff_ptr: u32,
+) -> Result<(Fr, usize), ()> {
+    let coeff = mload(memory, coeff_ptr).unwrap().into_fr();
+    let mut r_eval = Fr::ZERO;
+    r_eval += coeff
+        * calldataload(raw_proof, (lsb16(&r_evals_data) - PROOF_OFFSET) as u32)
+            .unwrap()
+            .into_fr();
+    r_evals_data >>= 16;
+    r_eval *= zeta;
+    r_eval += coeff * quotient_eval;
+    // for { let i := 0 } lt(i, num_words) { i := add(i, 1) } {
+    for _ in 0..num_words {
+        // for { } r_evals_data { } {
+        while !r_evals_data.is_zero() {
+            let eval_group_len = lsb8(&r_evals_data);
+            r_evals_data >>= 8;
+            //switch eq(eval_group_len, 0x0)
+            // case 0x0 {
+            if eval_group_len != 0x0 {
+                // for { let j := 0 } lt(j, eval_group_len) { j := add(j, 1) } {
+                for _ in 0..eval_group_len {
+                    r_eval = r_eval * zeta
+                        + coeff
+                            * calldataload(raw_proof, (lsb16(&r_evals_data) - PROOF_OFFSET) as u32)
+                                .unwrap()
+                                .into_fr();
+                    r_evals_data >>= 16;
+                }
+            // } default {
+            } else {
+                let mut mptr = lsb16(&r_evals_data);
+                r_evals_data >>= 16;
+                let mptr_end = lsb16(&r_evals_data);
+                while mptr_end < mptr {
+                    r_eval = r_eval * zeta
+                        + coeff
+                            * calldataload(raw_proof, (mptr - PROOF_OFFSET) as u32)
+                                .unwrap()
+                                .into_fr();
+                    mptr -= 0x20;
+                }
+                r_evals_data >>= 16;
+            }
+        }
+        ptr += 0x20;
+        r_evals_data = mload(memory, ptr).unwrap().into_u256();
+    }
+    // ret0 := r_eval
+    // ret1 := ptr
+    Ok((r_eval, ptr as usize))
+}
+
+fn multi_rot_set(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    mut r_evals_data: U256,
+    mut ptr: u32,
+    num_words: u32,
+    rot_len: u32,
+    zeta: Fr,
+    coeff_ptr: u32,
+) -> Result<(Fr, usize), ()> {
+    let mut r_eval = Fr::ZERO;
+    // for { let i := 0 } lt(i, num_words) { i := add(i, 1) } {
+    for i in 0..num_words {
+        // for { } r_evals_data { } {
+        while !r_evals_data.is_zero() {
+            // for { let j := 0 } lt(j, rot_len) { j := add(j, 0x20) } {
+            for j in (0..rot_len).step_by(0x20) {
+                r_eval += mload(memory, coeff_ptr + j).unwrap().into_fr()
+                    * calldataload(raw_proof, (lsb16(&r_evals_data) - PROOF_OFFSET) as u32)
+                        .unwrap()
+                        .into_fr();
+                r_evals_data >>= 16;
+            }
+            // Only on the last index do we NOT execute this if block.
+            if !r_evals_data.is_zero() || i + 1 < num_words {
+                // i < num_words - 1
+                r_eval *= zeta;
+            }
+        }
+        ptr += 0x20;
+        r_evals_data = mload(memory, ptr).unwrap().into_u256();
+    }
+    // ret0 := r_eval
+    // ret1 := ptr
+
+    Ok((r_eval, ptr as usize))
 }
 
 #[cfg(test)]
