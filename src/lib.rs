@@ -8,7 +8,7 @@ mod types;
 mod utils;
 // mod vk;
 
-use core::num;
+use core::ops::BitAnd;
 
 use ark_bn254_ext::{CurveHooks, G1Projective};
 use ark_ec::{AffineRepr, CurveGroup};
@@ -1175,8 +1175,158 @@ fn verify_proof_inner<H: CurveHooks>(
             }
         }
         // r_eval_computation
-        {}
+        {
+            let mut r_eval_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let mptr_end = lsb16(&r_eval_data) + vka_end;
+
+            let mut mptr = vka_end;
+            r_eval_data >>= 16;
+            let mut sum_mptr = lsb16(&r_eval_data) + vka_end;
+            while mptr < mptr_end {
+                // mstore(mptr, mload(sum_mptr))
+                let val = mload(memory, sum_mptr as u32).unwrap();
+                memory[mptr..mptr + 0x20].copy_from_slice(&val);
+
+                mptr += 0x20;
+                sum_mptr += 0x20;
+            }
+            r_eval_data >>= 16;
+
+            // success := batch_invert(success, vka_end, mptr_end)
+            let mut inverses = (vka_end..mptr_end) // TODO: DOUBLE-CHECK
+                .step_by(0x20)
+                .map(|p| mload(memory, p as u32).unwrap().into_fr())
+                .collect::<Vec<_>>();
+            ark_ff::fields::batch_inversion(&mut inverses);
+            for i in 0..inverses.len() {
+                memory[(vka_end + i * 0x20)..vka_end + (i + 1) * 0x20]
+                    .copy_from_slice(&inverses[i].into_be_bytes32());
+            }
+
+            let r_eval_ptr = lsb16(&r_eval_data) + vka_end;
+            let mut r_eval = mload(memory, mptr_end as u32 - 0x20).unwrap().into_fr()
+                * mload(memory, r_eval_ptr as u32).unwrap().into_fr();
+            r_eval_data >>= 16;
+
+            let mut sum_inv_mptr = mptr_end - 0x40;
+            let sum_inv_mptr_end = vka_end - 0x20;
+            let mut r_eval_mptr = r_eval_ptr - 0x20;
+
+            while sum_inv_mptr > sum_inv_mptr_end {
+                r_eval *= mload(memory, theta_mptr as u32 + 0xc0).unwrap().into_fr();
+                r_eval += mload(memory, sum_inv_mptr as u32).unwrap().into_fr()
+                    * mload(memory, r_eval_mptr as u32).unwrap().into_fr();
+
+                sum_inv_mptr -= 0x20;
+                r_eval_mptr -= 0x20;
+            }
+            // mstore(add(theta_mptr, 0x2A0), r_eval)
+            let idx = theta_mptr + 0x2a0;
+            memory[idx..idx + 0x20].copy_from_slice(&r_eval.into_be_bytes32());
+
+            pcs_ptr += 0x20;
+        }
+        // pairing_input_computations
+        let mut nu = mload(memory, theta_mptr as u32 + 0xC0).unwrap().into_fr();
+        {
+            let mut pairing_input_meta_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&pairing_input_meta_data);
+            pairing_input_meta_data >>= 8;
+            let set_coeff = lsb16(&pairing_input_meta_data) + vka_end;
+            pairing_input_meta_data >>= 16;
+            // let ec_points_cptr_packed = pairing_input_meta_data.0[0] & 0xFFFFFFFFFFFFFFFFFFFF;
+            let ec_points_cptr_packed =
+                pairing_input_meta_data.bitand(U256::new([0xffffffffffffffffu64, 0xffffu64, 0, 0]));
+
+            pairing_input_meta_data >>= 80;
+            let i = pcs_ptr;
+            pcs_ptr = end_ptr_packed_lens;
+            let mut first = true;
+
+            // while i < end_ptr_packed_lens {
+            //     while !pairing_input_meta_data.is_zero() {
+            //         let len = lsb8(&pairing_input_meta_data);
+            //         pairing_input_meta_data >>= 8;
+            //         if first {
+            //             first = false;
+            //             success := pairing_input_computations_first(len, pcs_ptr, mload(pcs_ptr), theta_mptr, success)
+            //             pcs_ptr += len;
+            //             continue;
+            //         }
+            //         success := pairing_input_computations(len, pcs_ptr, mload(pcs_ptr), theta_mptr, success)
+            //         pcs_ptr += len;
+            //         success := ec_mul_tmp(success, mulmod(nu, mload(set_coeff), R))
+            //         set_coeff += 0x20;
+            //         success := ec_add_acc(success, mload(add(0x80, vka_end)), mload(add(0xa0, vka_end)))
+            //         // execute this if statement if not the last set
+            //         if or(0x1, lt(i, sub(end_ptr_packed_lens, 0x20))) {
+            //             nu *= mload(memory, theta_mptr as u32+ 0xc0).unwrap().into_fr();
+            //         }
+            //     }
+            //     pairing_input_meta_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+            //     i += 0x20;
+            // }
+            // mstore(add(0x80, vka_end), mload(0x0260))
+            // mstore(add(0xa0, vka_end), mload(0x0280))
+            // success := ec_mul_tmp(success, sub(R, mload(add(theta_mptr, 0x2A0))))
+            // success := ec_add_acc(success, mload(add(0x80, vka_end)), mload(add(0xa0, vka_end)))
+            // mstore(add(0x80, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
+            // ec_points_cptr_packed := shr(16, ec_points_cptr_packed)
+            // mstore(add(0xa0, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
+            // ec_points_cptr_packed := shr(16, ec_points_cptr_packed)
+            // success := ec_mul_tmp(success, sub(R, mload(add(and(ec_points_cptr_packed, PTR_BITMASK), vka_end))))
+            // ec_points_cptr_packed := shr(16, ec_points_cptr_packed)
+            // success := ec_add_acc(success, mload(add(0x80, vka_end)), mload(add(0xa0, vka_end)))
+            // let w_prime_x := calldataload(and(ec_points_cptr_packed, PTR_BITMASK))
+            // ec_points_cptr_packed := shr(16, ec_points_cptr_packed)
+            // let w_prime_y := calldataload(and(ec_points_cptr_packed, PTR_BITMASK))
+            // mstore(add(0x80, vka_end), w_prime_x)
+            // mstore(add(0xa0, vka_end), w_prime_y)
+            // success := ec_mul_tmp(success, mload(add(theta_mptr, 0xE0)))
+            // success := ec_add_acc(success, mload(add(0x80, vka_end)), mload(add(0xa0, vka_end)))
+            // mstore(add(theta_mptr, 0x2C0), mload(vka_end))
+            // mstore(add(theta_mptr, 0x2E0), mload(add(0x20, vka_end)))
+            // mstore(add(theta_mptr, 0x300), w_prime_x)
+            // mstore(add(theta_mptr, 0x320), w_prime_y)
+        }
     }
+
+    // Random linear combine with accumulator
+    // if mload(0x01e0) {
+    //     mstore(add(0x00, vka_end), mload(add(theta_mptr, 0x100)))
+    //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x120)))
+    //     mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x140)))
+    //     mstore(add(0x60, vka_end), mload(add(theta_mptr, 0x160)))
+    //     mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x2c0)))
+    //     mstore(add(0xa0, vka_end), mload(add(theta_mptr, 0x2e0)))
+    //     mstore(add(0xc0, vka_end), mload(add(theta_mptr, 0x300)))
+    //     mstore(add(0xe0, vka_end), mload(add(theta_mptr, 0x320)))
+    //     let challenge := mod(keccak256(vka_end, add(0x100, vka_end)), R)
+
+    //     // [pairing_lhs] += challenge * [acc_lhs]
+    //     success := ec_mul_acc(success, challenge)
+    //     success := ec_add_acc(success, mload(add(theta_mptr, 0x2c0)), mload(add(theta_mptr, 0x2e0)))
+    //     mstore(add(theta_mptr, 0x2c0), mload(vka_end))
+    //     mstore(add(theta_mptr, 0x2e0), mload(add(0x20, vka_end)))
+
+    //     // [pairing_rhs] += challenge * [acc_rhs]
+    //     mstore(vka_end, mload(add(theta_mptr, 0x140)))
+    //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x160)))
+    //     success := ec_mul_acc(success, challenge)
+    //     success := ec_add_acc(success, mload(add(theta_mptr, 0x300)), mload(add(theta_mptr, 0x320)))
+    //     mstore(add(theta_mptr, 0x300), mload(vka_end))
+    //     mstore(add(theta_mptr, 0x320), mload(add(0x20, vka_end)))
+    // }
+
+    // // Perform pairing
+    // success := ec_pairing(
+    //     success,
+    //     vka_end,
+    //     mload(add(theta_mptr, 0x2c0)),
+    //     mload(add(theta_mptr, 0x2e0)),
+    //     mload(add(theta_mptr, 0x300)),
+    //     mload(add(theta_mptr, 0x320))
+    // )
 
     Ok(())
 }
