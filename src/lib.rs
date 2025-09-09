@@ -934,22 +934,6 @@ fn verify_proof_inner<H: CurveHooks>(
                 vka_end + 0x20
             );
 
-            // for
-            //     {
-            //         let mptr := and(vanishing_computations, PTR_BITMASK)
-            //         vanishing_computations >>= 16;
-            //         let mptr_end := and(vanishing_computations, PTR_BITMASK)
-            //         vanishing_computations >>= 16;
-            //         let point_mptr := and(vanishing_computations, PTR_BITMASK)
-            //     }
-            //     lt(mptr, mptr_end)
-            //     {
-            //         mptr += 0x20
-            //         point_mptr += 0x20
-            //     }
-            // {
-            //     mstore(add(vka_end, mptr), addmod(mu, sub(R, mload(add(point_mptr, vka_end))), R))
-            // }
             let mut mptr = lsb16(&vanishing_computations);
             vanishing_computations >>= 16;
             let mptr_end = lsb16(&vanishing_computations);
@@ -1085,13 +1069,7 @@ fn verify_proof_inner<H: CurveHooks>(
             norm_coeff_data >>= 16;
             // mstore(mptr0, diff_0_inv)
             memory[mptr0..mptr0 + 0x20].copy_from_slice(&diff_0_inv.into_be_bytes32());
-            // for
-            //     {
-            //         let mptr = mptr0 + 0x20;
-            //         let mptr_end := add(mptr0, and(norm_coeff_data, PTR_BITMASK))
-            //     }
-            //     lt(mptr, mptr_end)
-            //     { mptr += 0x20; }
+
             let mptr_end = mptr0 + lsb16(&norm_coeff_data);
             for mptr in ((mptr0 + 0x20)..mptr_end).step_by(0x20) {
                 // mstore(mptr, mulmod(mload(mptr), diff_0_inv, R))
@@ -2327,6 +2305,100 @@ fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
     Ok(())
 }
 
+// Add (x, y) into point at (0x80, 0xa0).
+// Return updated (success).
+fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()> {
+    println!("\nec_add_tmp invoked:");
+    let vka_end = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+
+    // mstore(add(0xc0, vka_end), x)
+    // mstore(add(0xe0, vka_end), y)
+    // ret := and(success, staticcall(gas(), 0x06, add(0x80, vka_end), 0x80, add(0x80, vka_end), 0x40))
+
+    println!("G1 Point at vka_end + 0x80 = 0x{:x?}", vka_end + 0x80);
+    let point1 = read_g1::<H>(&memory, vka_end as usize + 0x80)
+        .unwrap()
+        .into_group(); // This might be incorrect...
+
+    println!("point1.x = {}", to_hex_string(&point1.x.into_be_bytes32()));
+    println!("point1.y = {}", to_hex_string(&point1.y.into_be_bytes32()));
+
+    let point2 = G1::<H>::new_unchecked(*x, *y);
+
+    println!("Other G1 point:");
+    println!("point2.x = {}", to_hex_string(&point2.x.into_be_bytes32()));
+    println!("point2.y = {}", to_hex_string(&point2.y.into_be_bytes32()));
+
+    // Validate point
+    if !point2.is_on_curve() {
+        return Err(());
+    }
+
+    let res = (point1 + point2).into_affine();
+
+    let vka_end = vka_end as usize;
+    memory[(vka_end + 0x80)..(vka_end + 0xa0)]
+        .copy_from_slice(&res.x().expect("Should succeed").into_be_bytes32());
+    memory[(vka_end + 0xa0)..(vka_end + 0xc0)]
+        .copy_from_slice(&res.y().expect("Should succeed").into_be_bytes32());
+
+    println!("Sum of points:");
+    println!(
+        "res.x = {} written at 0x{:x?}",
+        to_hex_string(&res.x.into_be_bytes32()),
+        vka_end + 0x80
+    );
+    println!(
+        "res.y = {} written at 0x{:x?}",
+        to_hex_string(&res.y.into_be_bytes32()),
+        vka_end + 0x80 + 0x20
+    );
+
+    Ok(())
+}
+
+// Scale point at (0x80, 0xa0) by scalar.
+// Return updated (success).
+fn ec_mul_tmp<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
+    println!("\nec_mul_tmp invoked:");
+    let vka_end = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    // mstore(add(0xc0, vka_end), scalar)
+    // let idx = 0xc0 + vka_end as usize;
+    // memory[idx..idx + 0x20].copy_from_slice(&scalar.into_be_bytes32());
+
+    // ret := and(success, staticcall(gas(), 0x07, add(0x80, vka_end), 0x60, add(0x80, vka_end), 0x40))
+
+    let point = read_g1::<H>(&memory, (vka_end + 0x80) as usize)
+        .unwrap()
+        .into_group(); // This might be incorrect...
+
+    println!("Scalar = {}", to_hex_string(&scalar.into_be_bytes32()));
+
+    println!("point.x = {}", to_hex_string(&point.x.into_be_bytes32()));
+    println!("point.y = {}", to_hex_string(&point.y.into_be_bytes32()));
+
+    let res = (point * scalar).into_affine();
+    let vka_end = vka_end as usize;
+    memory[(vka_end + 0x80)..(vka_end + 0xa0)]
+        .copy_from_slice(&res.x().expect("Should succeed").into_be_bytes32());
+    memory[(vka_end + 0xa0)..(vka_end + 0xc0)]
+        .copy_from_slice(&res.y().expect("Should succeed").into_be_bytes32());
+
+    println!("Scalar Product:");
+    println!(
+        "res.x = {} written at 0x{:x?}",
+        to_hex_string(&res.x.into_be_bytes32()),
+        vka_end
+    );
+    println!(
+        "res.y = {} written at 0x{:x?}",
+        to_hex_string(&res.y.into_be_bytes32()),
+        vka_end + 0x20
+    );
+
+    Ok(())
+}
+
 fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256) -> U256 {
     let coeff_len = lsb8(&coeff_len_data);
     let ret = coeff_len_data >> 8;
@@ -2544,6 +2616,315 @@ fn multi_rot_set(
     // ret1 := ptr
 
     Ok((r_eval, ptr as usize))
+}
+
+fn pairing_input_computations_first<H: CurveHooks>(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    len: u32,
+    mut pcs_ptr: u32,
+    mut data: U256,
+    theta_mptr: u32,
+) -> Result<(), ()> {
+    // mstore(mload(0x40), calldataload(and(data, PTR_BITMASK)))
+    let idx = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
+    let bytes = calldataload(raw_proof, lsb16(&data) as u32).unwrap();
+    memory[idx..idx + 0x20].copy_from_slice(&bytes);
+    data >>= 16;
+    // mstore(add(0x20, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
+    let idx = 0x20 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
+    let bytes = calldataload(raw_proof, lsb16(&data) as u32).unwrap();
+    memory[idx..idx + 0x20].copy_from_slice(&bytes);
+    data >>= 16;
+    // for { let i := 0 } lt(i, len) { i := add(i, 0x20) } {
+    for _ in (0..len).step_by(0x20) {
+        // for { } data { } {
+        while !data.is_zero() {
+            let ptr_loc = lsb8(&data);
+            data >>= 8;
+            let comm_len = lsb8(&data);
+            data >>= 8;
+            match comm_len {
+                0x0 => {
+                    match ptr_loc {
+                        0x0 => {
+                            let mut mptr = lsb16(&data);
+                            data >>= 16;
+                            let mptr_end = lsb16(&data);
+                            while mptr_end < mptr {
+                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                                ec_mul_acc::<H>(memory, &s)?;
+                                let x = Fq::from_be_bytes_mod_order(
+                                    &mload(memory, mptr as u32).unwrap(),
+                                );
+                                let y = Fq::from_be_bytes_mod_order(
+                                    &mload(memory, mptr as u32 + 0x20).unwrap(),
+                                );
+                                ec_add_acc::<H>(memory, &x, &y)?;
+                                mptr -= 0x40;
+                            }
+                        }
+                        0x1 => {
+                            let mut mptr = lsb16(&data);
+                            data >>= 16;
+                            let mptr_end = lsb16(&data);
+                            while mptr_end < mptr {
+                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                                ec_mul_acc::<H>(memory, &s)?;
+                                let x = Fq::from_be_bytes_mod_order(
+                                    &calldataload(raw_proof, (mptr - PROOF_OFFSET) as u32).unwrap(),
+                                );
+                                let y = Fq::from_be_bytes_mod_order(
+                                    &calldataload(raw_proof, (mptr + 0x20 - PROOF_OFFSET) as u32)
+                                        .unwrap(),
+                                );
+                                ec_add_acc::<H>(memory, &x, &y)?;
+                                mptr -= 0x40;
+                            }
+                        }
+                        _ => {
+                            return Err(());
+                        } // TODO: Proper error handling
+                    };
+                    data >>= 16;
+                }
+                _ => {
+                    match ptr_loc {
+                        0x00 => {
+                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                            ec_mul_acc::<H>(memory, &s)?;
+                            let x = Fq::from_be_bytes_mod_order(
+                                &mload(memory, lsb16(&data) as u32).unwrap(),
+                            );
+                            let y = Fq::from_be_bytes_mod_order(
+                                &mload(memory, lsb16(&(data >> 16)) as u32).unwrap(),
+                            );
+                            ec_add_acc::<H>(memory, &x, &y)?;
+                            if comm_len == 0x02 {
+                                data >>= 32;
+                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                                ec_mul_acc::<H>(memory, &s)?;
+                                let x = Fq::from_be_bytes_mod_order(
+                                    &mload(memory, lsb16(&data) as u32).unwrap(),
+                                );
+                                let y = Fq::from_be_bytes_mod_order(
+                                    &mload(memory, lsb16(&(data >> 16)) as u32).unwrap(),
+                                );
+                                ec_add_acc::<H>(memory, &x, &y)?;
+                            }
+                            data >>= 32;
+                        }
+                        0x01 => {
+                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                            ec_mul_acc::<H>(memory, &s)?;
+                            let x = Fq::from_be_bytes_mod_order(
+                                &calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32)
+                                    .unwrap(),
+                            );
+                            let y = Fq::from_be_bytes_mod_order(
+                                &calldataload(
+                                    raw_proof,
+                                    (lsb16(&(data >> 16)) - PROOF_OFFSET) as u32,
+                                )
+                                .unwrap(),
+                            );
+                            ec_add_acc::<H>(memory, &x, &y)?;
+                            if comm_len == 0x02 {
+                                data >>= 32;
+                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                                ec_mul_acc::<H>(memory, &s)?;
+                                let x = Fq::from_be_bytes_mod_order(
+                                    &calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32)
+                                        .unwrap(),
+                                );
+                                let y = Fq::from_be_bytes_mod_order(
+                                    &calldataload(
+                                        raw_proof,
+                                        (lsb16(&(data >> 16)) - PROOF_OFFSET) as u32,
+                                    )
+                                    .unwrap(),
+                                );
+                                ec_add_acc::<H>(memory, &x, &y)?;
+                            }
+                            data >>= 32;
+                        }
+                        // Quotient eval x and y points
+                        0x02 => {
+                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                            ec_mul_acc::<H>(memory, &s)?;
+                            let x = Fq::from_be_bytes_mod_order(
+                                &mload(memory, theta_mptr + 0x260).unwrap(),
+                            );
+                            let y = Fq::from_be_bytes_mod_order(
+                                &mload(memory, theta_mptr + 0x280).unwrap(),
+                            );
+                            ec_add_acc::<H>(memory, &x, &y)?;
+                        }
+                        _ => {
+                            return Err(());
+                        } // TODO: Proper error handling
+                    }
+                }
+            }
+        }
+        pcs_ptr += 0x20;
+        data = mload(memory, pcs_ptr).unwrap().into_u256();
+    }
+    Ok(())
+}
+
+fn pairing_input_computations<H: CurveHooks>(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    len: u32,
+    mut pcs_ptr: u32,
+    mut data: U256,
+    theta_mptr: u32,
+) -> Result<(), ()> {
+    // mstore(add(0x80, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
+    let idx = 0x80 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
+    let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
+    memory[idx..idx + 0x20].copy_from_slice(&bytes);
+    data >>= 16;
+    // mstore(add(0xa0, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
+    let idx = 0xa0 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
+    let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
+    memory[idx..idx + 0x20].copy_from_slice(&bytes);
+    data >>= 16;
+    // for { let i := 0 } lt(i, len) { i := add(i, 0x20) } {
+    for i in (0..len).step_by(0x20) {
+        // for { } data { } {
+        while !data.is_zero() {
+            let ptr_loc = lsb8(&data);
+            data >>= 8;
+            let comm_len = lsb8(&data);
+            data >>= 8;
+            match comm_len {
+                0x0 => {
+                    match ptr_loc {
+                        0x00 => {
+                            let mut mptr = lsb16(&data);
+                            data >>= 16;
+                            let mptr_end = lsb16(&data);
+                            while mptr_end < mptr {
+                                let s = mload(memory, theta_mptr + 0xA0).unwrap().into_fr();
+                                ec_mul_tmp::<H>(memory, &s);
+                                let x = Fq::from_be_bytes_mod_order(
+                                    &mload(memory, mptr as u32).unwrap(),
+                                );
+                                let y = Fq::from_be_bytes_mod_order(
+                                    &mload(memory, mptr as u32 + 0x20).unwrap(),
+                                );
+                                ec_add_tmp::<H>(memory, &x, &y);
+                                mptr -= 0x40;
+                            }
+                        }
+                        0x01 => {
+                            let mut mptr = lsb16(&data);
+                            data >>= 16;
+                            let mptr_end = lsb16(&data);
+                            while mptr_end < mptr {
+                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                                ec_mul_tmp::<H>(memory, &s);
+                                let x = Fq::from_be_bytes_mod_order(
+                                    &calldataload(raw_proof, mptr as u32).unwrap(),
+                                );
+                                let y = Fq::from_be_bytes_mod_order(
+                                    &calldataload(raw_proof, mptr as u32 + 0x20).unwrap(),
+                                );
+                                ec_add_tmp::<H>(memory, &x, &y);
+                                mptr -= 0x40;
+                            }
+                        }
+                        _ => {
+                            return Err(());
+                        } // TODO: Proper error handling
+                    }
+                    data >>= 16;
+                }
+                _ => {
+                    match ptr_loc {
+                        0x00 => {
+                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                            ec_mul_tmp::<H>(memory, &s);
+                            let x = Fq::from_be_bytes_mod_order(
+                                &mload(memory, lsb16(&data) as u32).unwrap(),
+                            );
+                            let y = Fq::from_be_bytes_mod_order(
+                                &mload(memory, lsb16(&(data >> 16)) as u32).unwrap(),
+                            );
+                            ec_add_tmp::<H>(memory, &x, &y);
+                            if comm_len == 0x2 {
+                                data >>= 32;
+                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                                ec_mul_tmp::<H>(memory, &s);
+                                let x = Fq::from_be_bytes_mod_order(
+                                    &mload(memory, lsb16(&data) as u32).unwrap(),
+                                );
+                                let y = Fq::from_be_bytes_mod_order(
+                                    &mload(memory, lsb16(&(data >> 16)) as u32).unwrap(),
+                                );
+                                ec_add_tmp::<H>(memory, &x, &y);
+                            }
+                            data >>= 32;
+                        }
+                        0x01 => {
+                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                            ec_mul_tmp::<H>(memory, &s);
+                            let x = Fq::from_be_bytes_mod_order(
+                                &calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32)
+                                    .unwrap(),
+                            );
+                            let y = Fq::from_be_bytes_mod_order(
+                                &calldataload(
+                                    raw_proof,
+                                    (lsb16(&(data >> 16)) - PROOF_OFFSET) as u32,
+                                )
+                                .unwrap(),
+                            );
+                            ec_add_tmp::<H>(memory, &x, &y);
+                            if comm_len == 0x2 {
+                                data >>= 32;
+                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                                ec_mul_tmp::<H>(memory, &s);
+                                let x = Fq::from_be_bytes_mod_order(
+                                    &calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32)
+                                        .unwrap(),
+                                );
+                                let y = Fq::from_be_bytes_mod_order(
+                                    &calldataload(
+                                        raw_proof,
+                                        (lsb16(&(data >> 16)) - PROOF_OFFSET) as u32,
+                                    )
+                                    .unwrap(),
+                                );
+                                ec_add_tmp::<H>(memory, &x, &y);
+                            }
+                            data >>= 32;
+                        }
+                        // Quotient eval x and y points
+                        0x02 => {
+                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                            ec_mul_tmp::<H>(memory, &s);
+                            let x = Fq::from_be_bytes_mod_order(
+                                &mload(memory, theta_mptr + 0x260).unwrap(),
+                            );
+                            let y = Fq::from_be_bytes_mod_order(
+                                &mload(memory, theta_mptr + 0x280).unwrap(),
+                            );
+                            ec_add_tmp::<H>(memory, &x, &y);
+                        }
+                        _ => {
+                            return Err(());
+                        } // TODO: Proper error handling
+                    }
+                }
+            }
+        }
+        pcs_ptr += 0x20;
+        data = mload(memory, pcs_ptr).unwrap().into_u256();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
