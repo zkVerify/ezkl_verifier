@@ -1292,31 +1292,61 @@ fn verify_proof_inner<H: CurveHooks>(
     }
 
     // Random linear combine with accumulator
-    // if mload(0x01e0) {
-    //     mstore(add(0x00, vka_end), mload(add(theta_mptr, 0x100)))
-    //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x120)))
-    //     mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x140)))
-    //     mstore(add(0x60, vka_end), mload(add(theta_mptr, 0x160)))
-    //     mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x2c0)))
-    //     mstore(add(0xa0, vka_end), mload(add(theta_mptr, 0x2e0)))
-    //     mstore(add(0xc0, vka_end), mload(add(theta_mptr, 0x300)))
-    //     mstore(add(0xe0, vka_end), mload(add(theta_mptr, 0x320)))
-    //     let challenge := mod(keccak256(vka_end, add(0x100, vka_end)), R)
+    if !mload(memory, 0x0140 + VKA_OFFSET as u32 + 5 * 0x20)
+        .unwrap()
+        .into_u256()
+        .is_zero()
+    {
+        //     mstore(add(0x00, vka_end), mload(add(theta_mptr, 0x100)))
+        let mut bytes = mload(memory, theta_mptr as u32 + 0x100).unwrap();
+        memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
+        //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x120)))
+        bytes = mload(memory, theta_mptr as u32 + 0x120).unwrap();
+        memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
+        //     mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x140)))
+        bytes = mload(memory, theta_mptr as u32 + 0x140).unwrap();
+        memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(&bytes);
+        //     mstore(add(0x60, vka_end), mload(add(theta_mptr, 0x160)))
+        bytes = mload(memory, theta_mptr as u32 + 0x160).unwrap();
+        memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(&bytes);
+        //     mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x2c0)))
+        bytes = mload(memory, theta_mptr as u32 + 0x2c0).unwrap();
+        memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(&bytes);
+        //     mstore(add(0xa0, vka_end), mload(add(theta_mptr, 0x2e0)))
+        bytes = mload(memory, theta_mptr as u32 + 0x2e0).unwrap();
+        memory[(vka_end + 0xa0)..(vka_end + 0xc0)].copy_from_slice(&bytes);
+        //     mstore(add(0xc0, vka_end), mload(add(theta_mptr, 0x300)))
+        bytes = mload(memory, theta_mptr as u32 + 0x300).unwrap();
+        memory[(vka_end + 0xc0)..(vka_end + 0xe0)].copy_from_slice(&bytes);
+        //     mstore(add(0xe0, vka_end), mload(add(theta_mptr, 0x320)))
+        bytes = mload(memory, theta_mptr as u32 + 0x320).unwrap();
+        memory[(vka_end + 0xe0)..(vka_end + 0x100)].copy_from_slice(&bytes);
 
-    //     // [pairing_lhs] += challenge * [acc_lhs]
-    //     success := ec_mul_acc(success, challenge)
-    //     success := ec_add_acc(success, mload(add(theta_mptr, 0x2c0)), mload(add(theta_mptr, 0x2e0)))
-    //     mstore(add(theta_mptr, 0x2c0), mload(vka_end))
-    //     mstore(add(theta_mptr, 0x2e0), mload(add(0x20, vka_end)))
+        //     let challenge := mod(keccak256(vka_end, add(0x100, vka_end)), R)
+        let challenge = {
+            let start = vka_end;
+            let end = vka_end + 0x100 + vka_end;
+            let hash: [u8; 32] = Keccak256::new()
+                .chain_update(&memory[start..end])
+                .finalize()
+                .into();
+            hash.into_fr()
+        };
 
-    //     // [pairing_rhs] += challenge * [acc_rhs]
-    //     mstore(vka_end, mload(add(theta_mptr, 0x140)))
-    //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x160)))
-    //     success := ec_mul_acc(success, challenge)
-    //     success := ec_add_acc(success, mload(add(theta_mptr, 0x300)), mload(add(theta_mptr, 0x320)))
-    //     mstore(add(theta_mptr, 0x300), mload(vka_end))
-    //     mstore(add(theta_mptr, 0x320), mload(add(0x20, vka_end)))
-    // }
+        //     // [pairing_lhs] += challenge * [acc_lhs]
+        //     success := ec_mul_acc(success, challenge)
+        //     success := ec_add_acc(success, mload(add(theta_mptr, 0x2c0)), mload(add(theta_mptr, 0x2e0)))
+        //     mstore(add(theta_mptr, 0x2c0), mload(vka_end))
+        //     mstore(add(theta_mptr, 0x2e0), mload(add(0x20, vka_end)))
+
+        //     // [pairing_rhs] += challenge * [acc_rhs]
+        //     mstore(vka_end, mload(add(theta_mptr, 0x140)))
+        //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x160)))
+        //     success := ec_mul_acc(success, challenge)
+        //     success := ec_add_acc(success, mload(add(theta_mptr, 0x300)), mload(add(theta_mptr, 0x320)))
+        //     mstore(add(theta_mptr, 0x300), mload(vka_end))
+        //     mstore(add(theta_mptr, 0x320), mload(add(0x20, vka_end)))
+    }
 
     // // Perform pairing
     // success := ec_pairing(
