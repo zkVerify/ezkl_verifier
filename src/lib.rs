@@ -1032,26 +1032,72 @@ fn verify_proof_inner<H: CurveHooks>(
         }
         // coeff_computations
         {
+            println!(
+                "================================================================================"
+            );
+            println!("\t\tcoeff_computations");
+            println!(
+                "================================================================================"
+            );
+
             let mut coeff_len_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+
+            println!(
+                "coeff_len_data is now: {}",
+                to_hex_string(&coeff_len_data.into_be_bytes32())
+            );
+
             // Load in the least significant byte of the `coeff_len_data` word to get the total number
             // of words we will need to load in that contains the packed Vec<set.rots().len()>.
             let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&coeff_len_data);
+
+            println!("end_ptr_packed_lens = 0x{:x?}", end_ptr_packed_lens);
+
             coeff_len_data >>= 8;
-            let mut pcs_ptr = end_ptr_packed_lens;
+
+            println!(
+                "coeff_len_data after right-shifting by 8 bits is: {}",
+                to_hex_string(&coeff_len_data.into_be_bytes32())
+            );
+
+            let mut i = pcs_ptr;
+            pcs_ptr = end_ptr_packed_lens;
             // for {  } lt(i, end_ptr_packed_lens) { i := add(i, 0x20) } {
-            for i in (pcs_ptr..end_ptr_packed_lens).step_by(0x20) {
+            while i < end_ptr_packed_lens {
                 // for {  } coeff_len_data { } {
                 while !coeff_len_data.is_zero() {
+                    println!(
+                        "coeff_len_data is currently: {}",
+                        to_hex_string(&coeff_len_data.into_be_bytes32())
+                    );
+
                     let coeff_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
                     coeff_len_data = coeff_computations(memory, coeff_len_data, coeff_data);
                     pcs_ptr += 0x20;
                 }
                 coeff_len_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+                i += 0x20;
             }
         }
         // normalized_coeff_computations
         {
+            println!(
+                "================================================================================"
+            );
+            println!("\t\tnormalized_coeff_computations");
+            println!(
+                "================================================================================"
+            );
+
+            println!("pcs_ptr = 0x{:x?}", pcs_ptr);
+
             let mut norm_coeff_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+
+            println!(
+                "norm_coeff_data starts as: {}",
+                to_hex_string(&norm_coeff_data.into_be_bytes32())
+            );
+
             // success := batch_invert(success, vka_end, add(and(norm_coeff_data, PTR_BITMASK), vka_end))\
             let mut inverses = (vka_end..(vka_end + lsb16(&norm_coeff_data)))
                 .step_by(0x20)
@@ -1061,27 +1107,74 @@ fn verify_proof_inner<H: CurveHooks>(
             for i in 0..inverses.len() {
                 memory[(vka_end + i * 0x20)..vka_end + (i + 1) * 0x20]
                     .copy_from_slice(&inverses[i].into_be_bytes32());
+
+                println!(
+                    "Writing inverse: {} at: 0x{:x?}",
+                    to_hex_string(&inverses[i].into_be_bytes32()),
+                    vka_end + i * 0x20
+                );
             }
 
             norm_coeff_data >>= 16;
+
+            println!(
+                "norm_coeff_data after >> 16 is: {}",
+                to_hex_string(&norm_coeff_data.into_be_bytes32())
+            );
+
             let diff_0_inv = mload(memory, vka_end as u32).unwrap().into_fr();
             let mptr0 = lsb16(&norm_coeff_data) + vka_end;
             norm_coeff_data >>= 16;
+
+            println!(
+                "norm_coeff_data after >> 16 is: {}",
+                to_hex_string(&norm_coeff_data.into_be_bytes32())
+            );
+
             // mstore(mptr0, diff_0_inv)
             memory[mptr0..mptr0 + 0x20].copy_from_slice(&diff_0_inv.into_be_bytes32());
+
+            println!(
+                "Wrote diff_0_inv = {} at 0x{:x?}",
+                to_hex_string(&diff_0_inv.into_be_bytes32()),
+                mptr0
+            );
 
             let mptr_end = mptr0 + lsb16(&norm_coeff_data);
             for mptr in ((mptr0 + 0x20)..mptr_end).step_by(0x20) {
                 // mstore(mptr, mulmod(mload(mptr), diff_0_inv, R))
                 let val = mload(memory, mptr as u32).unwrap().into_fr() * diff_0_inv;
                 memory[mptr..mptr + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+                println!(
+                    "Now writing val = {} at 0x{:x?}",
+                    to_hex_string(&val.into_be_bytes32()),
+                    mptr
+                );
             }
             pcs_ptr += 0x20;
         }
         let mut coeff_ptr = vka_end + 0x20;
+
+        println!("coeff_ptr = 0x{:x?}", coeff_ptr);
+
         // r_evals_computations
         {
+            println!(
+                "================================================================================"
+            );
+            println!("\t\tr_evals_computations");
+            println!(
+                "================================================================================"
+            );
+
             let mut r_evals_meta_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+
+            println!(
+                "r_evals_meta_data starts as: {}",
+                to_hex_string(&r_evals_meta_data.into_be_bytes32())
+            );
+
             let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&r_evals_meta_data);
             r_evals_meta_data >>= 8;
             let mut set_coeff = lsb16(&r_evals_meta_data) + vka_end;
@@ -1118,6 +1211,13 @@ fn verify_proof_inner<H: CurveHooks>(
                     // mstore(r_eval_mptr, r_eval)
                     memory[r_eval_mptr..r_eval_mptr + 0x20]
                         .copy_from_slice(&r_eval.into_be_bytes32());
+
+                    println!(
+                        "Now writing r_eval = {} at 0x{:x?}",
+                        to_hex_string(&r_eval.into_be_bytes32()),
+                        r_eval_mptr
+                    );
+
                     r_eval_mptr += 0x20;
                 }
                 r_evals_meta_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
@@ -1126,14 +1226,29 @@ fn verify_proof_inner<H: CurveHooks>(
         }
         // coeff_sums_computation
         {
+            println!(
+                "================================================================================"
+            );
+            println!("\t\tcoeff_sums_computation");
+            println!(
+                "================================================================================"
+            );
+
             let mut coeff_sums_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+
+            println!(
+                "coeff_sums_data starts as: {}",
+                to_hex_string(&coeff_sums_data.into_be_bytes32()),
+            );
+
             let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&coeff_sums_data);
             coeff_sums_data >>= 8;
             coeff_ptr = vka_end + 0x20;
-            // let i := pcs_ptr
-            // pcs_ptr := end_ptr_packed_lens
+
+            let mut i = pcs_ptr;
+            pcs_ptr = end_ptr_packed_lens;
             // for {  } lt(i, end_ptr_packed_lens) { i := add(i, 0x20) } {
-            for i in (pcs_ptr..end_ptr_packed_lens).step_by(0x20) {
+            while i < end_ptr_packed_lens {
                 // for {  } coeff_sums_data { } {
                 while !coeff_sums_data.is_zero() {
                     let mut sum = mload(memory, coeff_ptr as u32).unwrap().into_fr();
@@ -1147,14 +1262,36 @@ fn verify_proof_inner<H: CurveHooks>(
                     let idx = lsb16(&coeff_sums_data) + vka_end;
                     // mstore(idx, sum)
                     memory[idx..idx + 0x20].copy_from_slice(&sum.into_be_bytes32());
+
+                    println!(
+                        "Writing sum = {} at: 0x{:x?}",
+                        to_hex_string(&sum.into_be_bytes32()),
+                        idx
+                    );
+
                     coeff_sums_data >>= 16;
                 }
                 coeff_sums_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+                i += 0x20;
             }
         }
         // r_eval_computation
         {
+            println!(
+                "================================================================================"
+            );
+            println!("\t\tr_eval_computation");
+            println!(
+                "================================================================================"
+            );
+
             let mut r_eval_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+
+            println!(
+                "r_eval_data starts at: {}",
+                to_hex_string(&r_eval_data.into_be_bytes32()),
+            );
+
             let mptr_end = lsb16(&r_eval_data) + vka_end;
 
             let mut mptr = vka_end;
@@ -1162,8 +1299,10 @@ fn verify_proof_inner<H: CurveHooks>(
             let mut sum_mptr = lsb16(&r_eval_data) + vka_end;
             while mptr < mptr_end {
                 // mstore(mptr, mload(sum_mptr))
-                let val = mload(memory, sum_mptr as u32).unwrap();
-                memory[mptr..mptr + 0x20].copy_from_slice(&val);
+                let bytes = mload(memory, sum_mptr as u32).unwrap();
+                memory[mptr..mptr + 0x20].copy_from_slice(&bytes);
+
+                println!("Writing val: {} at 0x{:x?}", to_hex_string(&bytes), mptr);
 
                 mptr += 0x20;
                 sum_mptr += 0x20;
@@ -1179,6 +1318,12 @@ fn verify_proof_inner<H: CurveHooks>(
             for i in 0..inverses.len() {
                 memory[(vka_end + i * 0x20)..vka_end + (i + 1) * 0x20]
                     .copy_from_slice(&inverses[i].into_be_bytes32());
+
+                println!(
+                    "Writing inverse: {} at 0x{:x?}",
+                    to_hex_string(&inverses[i].into_be_bytes32()),
+                    vka_end + i * 0x20
+                );
             }
 
             let r_eval_ptr = lsb16(&r_eval_data) + vka_end;
@@ -1202,12 +1347,34 @@ fn verify_proof_inner<H: CurveHooks>(
             let idx = theta_mptr + 0x2a0;
             memory[idx..idx + 0x20].copy_from_slice(&r_eval.into_be_bytes32());
 
+            println!(
+                "Writing r_eval: {} at 0x{:x?}",
+                to_hex_string(&r_eval.into_be_bytes32()),
+                idx
+            );
+
             pcs_ptr += 0x20;
         }
         // pairing_input_computations
         let mut nu = mload(memory, theta_mptr as u32 + 0xC0).unwrap().into_fr();
+
+        println!("nu = {}", to_hex_string(&nu.into_be_bytes32()));
         {
+            println!(
+                "================================================================================"
+            );
+            println!("\t\tpairing_input_computations");
+            println!(
+                "================================================================================"
+            );
+
             let mut pairing_input_meta_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+
+            println!(
+                "pairing_input_meta_data starts at: {}",
+                to_hex_string(&pairing_input_meta_data.into_be_bytes32())
+            );
+
             let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&pairing_input_meta_data);
             pairing_input_meta_data >>= 8;
             let mut set_coeff = lsb16(&pairing_input_meta_data) + vka_end;
@@ -1273,11 +1440,15 @@ fn verify_proof_inner<H: CurveHooks>(
             let g1_x_bytes = mload(&memory, idx1 as u32).unwrap();
             memory[idx2..idx2 + 0x20].copy_from_slice(&g1_x_bytes);
 
+            println!("Writing: {} at 0x{:x?}", to_hex_string(&g1_x_bytes), idx2);
+
             // mstore(add(0xa0, vka_end), mload(0x0280))
             let idx1 = 0x01e0 + VKA_OFFSET + 5 * 0x20; // g1_y index
             let idx2 = vka_end + 0x80;
             let g1_y_bytes = mload(&memory, idx1 as u32).unwrap();
             memory[idx2..idx2 + 0x20].copy_from_slice(&g1_y_bytes);
+
+            println!("Writing: {} at 0x{:x?}", to_hex_string(&g1_y_bytes), idx2);
 
             let s = -mload(memory, theta_mptr as u32 + 0x2a0).unwrap().into_fr();
             ec_mul_tmp::<H>(memory, &s);
@@ -1294,6 +1465,8 @@ fn verify_proof_inner<H: CurveHooks>(
             .unwrap();
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
+            println!("Writing: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+
             ec_points_cptr_packed >>= 16;
 
             // mstore(add(0xa0, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
@@ -1304,6 +1477,8 @@ fn verify_proof_inner<H: CurveHooks>(
             )
             .unwrap();
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+            println!("Writing: {} at 0x{:x?}", to_hex_string(&bytes), idx);
 
             ec_points_cptr_packed >>= 16;
 
@@ -1326,9 +1501,22 @@ fn verify_proof_inner<H: CurveHooks>(
             // mstore(add(0x80, vka_end), w_prime_x)
             let idx = 0x80 + vka_end;
             memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
+
+            println!(
+                "Writing w_prime_x = {} at 0x{:x?}",
+                to_hex_string(&w_prime_x),
+                idx
+            );
+
             // mstore(add(0xa0, vka_end), w_prime_y)
             let idx = 0xa0 + vka_end;
             memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
+
+            println!(
+                "Writing w_prime_y = {} at 0x{:x?}",
+                to_hex_string(&w_prime_y),
+                idx
+            );
 
             let s = mload(memory, theta_mptr as u32 + 0xe0).unwrap().into_fr();
             ec_mul_tmp::<H>(memory, &s);
@@ -1341,18 +1529,34 @@ fn verify_proof_inner<H: CurveHooks>(
             let bytes = mload(memory, vka_end as u32).unwrap();
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
+            println!("Writing: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+
             // mstore(add(theta_mptr, 0x2E0), mload(add(0x20, vka_end)))
             let idx = theta_mptr + 0x2e0;
             let bytes = mload(memory, 0x20 + vka_end as u32).unwrap();
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
+            println!("Writing: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+
             // mstore(add(theta_mptr, 0x300), w_prime_x)
             let idx = theta_mptr + 0x300;
             memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
 
+            println!(
+                "Writing w_prime_x = {} at 0x{:x?}",
+                to_hex_string(&w_prime_x),
+                idx
+            );
+
             // mstore(add(theta_mptr, 0x320), w_prime_y)
             let idx = theta_mptr + 0x320;
             memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
+
+            println!(
+                "Writing w_prime_y = {} at 0x{:x?}",
+                to_hex_string(&w_prime_y),
+                idx
+            );
         }
     }
 
@@ -2307,6 +2511,9 @@ fn ec_mul_acc<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
     println!("\nec_mul_acc invoked:");
 
     let vka_end = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+
+    println!("vka_end set!");
+
     let point = read_g1::<H>(&memory, vka_end as usize)
         .unwrap()
         .into_group(); // This might be incorrect...
@@ -2503,6 +2710,12 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
             .unwrap()
             .into_fr();
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+            println!(
+                "Writing: {} at 0x{:x?}",
+                to_hex_string(&val.into_be_bytes32()),
+                idx
+            );
         }
         _ => {
             let mut coeff = Fr::ONE;
@@ -2554,6 +2767,12 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
                 let idx = lsb16(&(coeff_data >> offset_base))
                     + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
                 memory[idx..idx + 0x20].copy_from_slice(&coeff.into_be_bytes32());
+
+                println!(
+                    "Writing: {} at 0x{:x?}",
+                    to_hex_string(&coeff.into_be_bytes32()),
+                    idx
+                );
             }
         }
     }
@@ -2717,11 +2936,17 @@ fn pairing_input_computations_first<H: CurveHooks>(
     let idx = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
     let bytes = calldataload(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+
     data >>= 16;
     // mstore(add(0x20, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
     let idx = 0x20 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
     let bytes = calldataload(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+
     data >>= 16;
     // for { let i := 0 } lt(i, len) { i := add(i, 0x20) } {
     for _ in (0..len).step_by(0x20) {
@@ -2837,8 +3062,18 @@ fn pairing_input_computations_first<H: CurveHooks>(
                         }
                         // Quotient eval x and y points
                         0x02 => {
+                            println!("here");
+
+                            println!("theta_mptr + 0xa0 = 0x{:x?}", theta_mptr + 0xa0);
+
                             let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+
+                            println!("scalar = {}", to_hex_string(&s.into_be_bytes32()));
+
                             ec_mul_acc::<H>(memory, &s)?;
+
+                            println!("returned!");
+
                             let x = Fq::from_be_bytes_mod_order(
                                 &mload(memory, theta_mptr + 0x260).unwrap(),
                             );
@@ -2872,14 +3107,20 @@ fn pairing_input_computations<H: CurveHooks>(
     let idx = 0x80 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
     let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+
     data >>= 16;
     // mstore(add(0xa0, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
     let idx = 0xa0 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
     let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+
     data >>= 16;
     // for { let i := 0 } lt(i, len) { i := add(i, 0x20) } {
-    for i in (0..len).step_by(0x20) {
+    for _ in (0..len).step_by(0x20) {
         // for { } data { } {
         while !data.is_zero() {
             let ptr_loc = lsb8(&data);

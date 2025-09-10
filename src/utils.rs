@@ -149,18 +149,33 @@ pub(crate) fn read_u256(bytes: &[u8]) -> Result<U256, ()> {
 // Parse point in G1.
 pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>, ()> {
     if start >= data.len() {
+        println!("error1");
         return Err(());
     }
     if data.len() < 64 {
+        println!("error2");
         return Err(());
     }
 
-    let x = Fq::from_bigint(read_u256(&data[start..(start + 32)])?).ok_or(())?;
-    let y = Fq::from_bigint(read_u256(&data[(start + 32)..(start + 64)])?).ok_or(())?;
+    println!("reading coordinates...");
+
+    println!("start = 0x{:x?}", start);
+
+    let x = Fq::from_be_bytes_mod_order(&data[start..(start + 32)]);
+    let y = Fq::from_be_bytes_mod_order(&data[(start + 32)..(start + 64)]);
+
+    println!("x = {}", to_hex_string(&x.into_be_bytes32()));
+    println!("y = {}", to_hex_string(&y.into_be_bytes32()));
+
+    // let x = Fq::from_bigint(read_u256(&data[start..(start + 32)])?).ok_or(())?;
+    // let y = Fq::from_bigint(read_u256(&data[(start + 32)..(start + 64)])?).ok_or(())?;
+
+    println!("successfully read coordinates!");
 
     // If (0, 0) is given, we interpret this as the point at infinity:
     // https://docs.rs/ark-ec/0.5.0/src/ark_ec/models/short_weierstrass/affine.rs.html#212-218
     if x == Fq::ZERO && y == Fq::ZERO {
+        println!("error3");
         return Ok(G1::zero());
     }
 
@@ -168,6 +183,7 @@ pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>,
 
     // Validate point
     if !point.is_on_curve() {
+        println!("error4");
         return Err(());
     }
     // This is always true for G1 with the BN254 curve.
