@@ -1368,6 +1368,11 @@ fn verify_proof_inner<H: CurveHooks>(
                 "================================================================================"
             );
 
+            println!(
+                "AT 0xAC0, we have: {}",
+                to_hex_string(&memory[0xac0..0xac0 + 0x20])
+            );
+
             let mut pairing_input_meta_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
 
             println!(
@@ -1434,6 +1439,7 @@ fn verify_proof_inner<H: CurveHooks>(
                 i += 0x20;
             }
             // Load G1's SRS generator from the VKA into memory
+
             // mstore(add(0x80, vka_end), mload(0x0260))
             let idx1 = 0x01c0 + VKA_OFFSET + 5 * 0x20; // g1_x index
             let idx2 = vka_end + 0x80;
@@ -1444,7 +1450,7 @@ fn verify_proof_inner<H: CurveHooks>(
 
             // mstore(add(0xa0, vka_end), mload(0x0280))
             let idx1 = 0x01e0 + VKA_OFFSET + 5 * 0x20; // g1_y index
-            let idx2 = vka_end + 0x80;
+            let idx2 = vka_end + 0xa0;
             let g1_y_bytes = mload(&memory, idx1 as u32).unwrap();
             memory[idx2..idx2 + 0x20].copy_from_slice(&g1_y_bytes);
 
@@ -1495,9 +1501,17 @@ fn verify_proof_inner<H: CurveHooks>(
             let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).unwrap());
             ec_add_acc::<H>(memory, &x, &y);
 
-            let w_prime_x = calldataload(raw_proof, lsb16(&ec_points_cptr_packed) as u32).unwrap();
+            let w_prime_x = calldataload(
+                raw_proof,
+                (lsb16(&ec_points_cptr_packed) - PROOF_OFFSET) as u32,
+            )
+            .unwrap();
             ec_points_cptr_packed >>= 16;
-            let w_prime_y = calldataload(raw_proof, lsb16(&ec_points_cptr_packed) as u32).unwrap();
+            let w_prime_y = calldataload(
+                raw_proof,
+                (lsb16(&ec_points_cptr_packed) - PROOF_OFFSET) as u32,
+            )
+            .unwrap();
             // mstore(add(0x80, vka_end), w_prime_x)
             let idx = 0x80 + vka_end;
             memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
@@ -2645,7 +2659,7 @@ fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
     println!(
         "res.y = {} written at 0x{:x?}",
         to_hex_string(&res.y.into_be_bytes32()),
-        vka_end + 0x80 + 0x20
+        vka_end + 0xa0
     );
 
     Ok(())
@@ -2682,12 +2696,12 @@ fn ec_mul_tmp<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
     println!(
         "res.x = {} written at 0x{:x?}",
         to_hex_string(&res.x.into_be_bytes32()),
-        vka_end
+        vka_end + 0x80
     );
     println!(
         "res.y = {} written at 0x{:x?}",
         to_hex_string(&res.y.into_be_bytes32()),
-        vka_end + 0x20
+        vka_end + 0xa0
     );
 
     Ok(())
@@ -2934,18 +2948,26 @@ fn pairing_input_computations_first<H: CurveHooks>(
 ) -> Result<(), ()> {
     // mstore(mload(0x40), calldataload(and(data, PTR_BITMASK)))
     let idx = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
-    let bytes = calldataload(raw_proof, lsb16(&data) as u32).unwrap();
+    let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
-    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+    println!(
+        "[pairing_input_computations_first] Wrote: {} at 0x{:x?}",
+        to_hex_string(&bytes),
+        idx
+    );
 
     data >>= 16;
     // mstore(add(0x20, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
     let idx = 0x20 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
-    let bytes = calldataload(raw_proof, lsb16(&data) as u32).unwrap();
+    let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
-    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+    println!(
+        "[pairing_input_computations_first] Wrote: {} at 0x{:x?}",
+        to_hex_string(&bytes),
+        idx
+    );
 
     data >>= 16;
     // for { let i := 0 } lt(i, len) { i := add(i, 0x20) } {
@@ -3108,7 +3130,11 @@ fn pairing_input_computations<H: CurveHooks>(
     let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
-    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+    println!(
+        "\n[pairing_input_computations] Wrote: {} at 0x{:x?}",
+        to_hex_string(&bytes),
+        idx
+    );
 
     data >>= 16;
     // mstore(add(0xa0, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
