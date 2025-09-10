@@ -1673,23 +1673,23 @@ fn verify_proof_inner<H: CurveHooks>(
     // RHS
     let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).unwrap());
     let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).unwrap());
-    let p_1 = -G1::new(x, y); // Is the minus sign required?
+    let p_1 = G1::new(x, y); // Is the minus sign required?
 
     let g1_points = [G1Prepared::from(p_0), G1Prepared::from(p_1)];
 
     let g2_x_1_index = 0x0200 + VKA_OFFSET + 5 * 0x20;
-    // TODO: VALIDATION REQUIRED!
     let data = &memory[g2_x_1_index..g2_x_1_index + 4 * 0x20];
-
+    let h1 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
+    // TODO: VALIDATION REQUIRED!
     // mstore(add(0x40, vka_end), mload( {{ vk_const_offsets["g2_x_1"]|hex() }}))
     // mstore(add(0x60, vka_end), mload( {{ vk_const_offsets["g2_x_2"]|hex() }}))
     // mstore(add(0x80, vka_end), mload( {{ vk_const_offsets["g2_y_1"]|hex() }}))
     // mstore(add(0xa0, vka_end), mload( {{ vk_const_offsets["g2_y_2"]|hex() }}))
-    let h1 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
 
     let neg_s_g2_x_1_index = 0x0280 + VKA_OFFSET + 5 * 0x20;
     let data = &memory[neg_s_g2_x_1_index..neg_s_g2_x_1_index + 4 * 0x20];
     let h2 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
+    // TODO: VALIDATION REQUIRED!
     // mstore(add(0x100, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_1"]|hex() }}))
     // mstore(add(0x120, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_2"]|hex() }}))
     // mstore(add(0x140, vka_end), mload( {{ vk_const_offsets["neg_s_g2_y_1"]|hex() }}))
@@ -1704,14 +1704,6 @@ fn verify_proof_inner<H: CurveHooks>(
     } else {
         Err(VerifyError::VerificationError)
     }
-
-    // success := ec_pairing(
-    //     vka_end,
-    //     mload(add(theta_mptr, 0x2c0)),
-    //     mload(add(theta_mptr, 0x2e0)),
-    //     mload(add(theta_mptr, 0x300)),
-    //     mload(add(theta_mptr, 0x320))
-    // )
 }
 
 // Read EC point (x, y) at (proof_cptr, proof_cptr + 0x20)

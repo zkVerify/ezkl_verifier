@@ -141,11 +141,11 @@ impl IntoBEBytes32 for u64 {
     }
 }
 
-pub(crate) fn read_u256(bytes: &[u8]) -> Result<U256, ()> {
-    <&[u8; 32]>::try_from(bytes)
-        .map_err(|_| ())
-        .map(IntoU256::into_u256)
-}
+// pub(crate) fn read_u256(bytes: &[u8]) -> Result<U256, ()> {
+//     <&[u8; 32]>::try_from(bytes)
+//         .map_err(|_| ())
+//         .map(IntoU256::into_u256)
+// }
 
 // Parse point in G1.
 pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>, ()> {
