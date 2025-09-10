@@ -1,5 +1,6 @@
-use crate::{BYTE_FLAG_BITMASK, PTR_BITMASK};
+use crate::{BYTE_FLAG_BITMASK, G2, PTR_BITMASK};
 use crate::{EVMWord, Fq, Fr, U256, errors::FieldError, types::G1};
+use ark_bn254::Fq2;
 use ark_bn254_ext::CurveHooks;
 use ark_ec::AffineRepr;
 use ark_ff::{AdditiveGroup, PrimeField};
@@ -190,6 +191,26 @@ pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>,
     debug_assert!(point.is_in_correct_subgroup_assuming_on_curve());
 
     Ok(point)
+}
+
+// Parse point in G2.
+pub(crate) fn read_g2<H: CurveHooks>(data: &[u8]) -> Result<G2<H>, ()> {
+    if data.len() != 128 {
+        return Err(());
+    }
+
+    // Read in reverse order (i.e., imaginary part before real part) to match
+    // Solidity's encoding:
+    // https://eips.ethereum.org/EIPS/eip-197#encoding
+    let x_c1 = read_fq_util(&data[0..32]).expect("Parsing the SRS should always succeed!");
+    let x_c0 = read_fq_util(&data[32..64]).expect("Parsing the SRS should always succeed!");
+    let y_c1 = read_fq_util(&data[64..96]).expect("Parsing the SRS should always succeed!");
+    let y_c0 = read_fq_util(&data[96..128]).expect("Parsing the SRS should always succeed!");
+
+    let x = Fq2::new(x_c0, x_c1);
+    let y = Fq2::new(y_c0, y_c1);
+
+    Ok(G2::<H>::new(x, y))
 }
 
 // Utility function for parsing points in G2

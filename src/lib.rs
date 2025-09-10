@@ -10,9 +10,11 @@ mod utils;
 
 use core::ops::BitAnd;
 
-use ark_bn254_ext::{CurveHooks, G1Projective};
-use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
+use ark_bn254::G1Affine;
+use ark_bn254_ext::CurveHooks;
+use ark_ec::{AffineRepr, CurveGroup, pairing::Pairing};
+use ark_ff::{AdditiveGroup, BigInteger, Field, One, PrimeField};
+use ark_models_ext::bn::{G1Prepared, G2Prepared};
 use sha3::{Digest, Keccak256};
 
 pub use types::*;
@@ -25,7 +27,7 @@ use crate::{
     constants::{BYTE_FLAG_BITMASK, DELTA, PTR_BITMASK},
     errors::VerifyError,
     utils::{
-        IntoBEBytes32, IntoFr, IntoU256, calldataload, lsb8, lsb16, lsb32, mload, read_g1,
+        IntoBEBytes32, IntoFr, IntoU256, calldataload, lsb8, lsb16, lsb32, mload, read_g1, read_g2,
         to_hex_string, u32_from_be_tail,
     },
 };
@@ -1616,32 +1618,100 @@ fn verify_proof_inner<H: CurveHooks>(
             hash.into_fr()
         };
 
-        //     // [pairing_lhs] += challenge * [acc_lhs]
-        //     success := ec_mul_acc(success, challenge)
-        //     success := ec_add_acc(success, mload(add(theta_mptr, 0x2c0)), mload(add(theta_mptr, 0x2e0)))
-        //     mstore(add(theta_mptr, 0x2c0), mload(vka_end))
-        //     mstore(add(theta_mptr, 0x2e0), mload(add(0x20, vka_end)))
+        println!(
+            "Generated challenge: {}",
+            to_hex_string(&challenge.into_be_bytes32())
+        );
 
-        //     // [pairing_rhs] += challenge * [acc_rhs]
-        //     mstore(vka_end, mload(add(theta_mptr, 0x140)))
-        //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x160)))
-        //     success := ec_mul_acc(success, challenge)
-        //     success := ec_add_acc(success, mload(add(theta_mptr, 0x300)), mload(add(theta_mptr, 0x320)))
-        //     mstore(add(theta_mptr, 0x300), mload(vka_end))
-        //     mstore(add(theta_mptr, 0x320), mload(add(0x20, vka_end)))
+        // [pairing_lhs] += challenge * [acc_lhs]
+        ec_mul_acc::<H>(memory, &challenge);
+        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).unwrap());
+        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).unwrap());
+        ec_add_acc::<H>(memory, &x, &y);
+        // mstore(add(theta_mptr, 0x2c0), mload(vka_end))
+        let idx = theta_mptr + 0x2c0;
+        let bytes = mload(memory, vka_end as u32).unwrap();
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        // mstore(add(theta_mptr, 0x2e0), mload(add(0x20, vka_end)))
+        let idx = theta_mptr + 0x2e0;
+        let bytes = mload(memory, vka_end as u32 + 0x20).unwrap();
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        // [pairing_rhs] += challenge * [acc_rhs]
+        // mstore(vka_end, mload(add(theta_mptr, 0x140)))
+        let idx = vka_end;
+        let bytes = mload(memory, theta_mptr as u32 + 0x140).unwrap();
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x160)))
+        let idx = vka_end + 0x20;
+        let bytes = mload(memory, theta_mptr as u32 + 0x160).unwrap();
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        ec_mul_acc::<H>(memory, &challenge);
+        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).unwrap());
+        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).unwrap());
+        ec_add_acc::<H>(memory, &x, &y);
+        // mstore(add(theta_mptr, 0x300), mload(vka_end))
+        let idx = theta_mptr + 0x300;
+        let bytes = mload(memory, vka_end as u32).unwrap();
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        // mstore(add(theta_mptr, 0x320), mload(add(0x20, vka_end)))
+        let idx = theta_mptr + 0x320;
+        let bytes = mload(memory, vka_end as u32 + 0x20).unwrap();
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
     }
 
-    // // Perform pairing
+    // Perform pairing
+
+    // LHS
+    let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).unwrap());
+    let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).unwrap());
+    let p_0 = G1::<H>::new(x, y);
+    // RHS
+    let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).unwrap());
+    let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).unwrap());
+    let p_1 = -G1::new(x, y); // Is the minus sign required?
+
+    let g1_points = [G1Prepared::from(p_0), G1Prepared::from(p_1)];
+
+    let g2_x_1_index = 0x0200 + VKA_OFFSET + 5 * 0x20;
+    // TODO: VALIDATION REQUIRED!
+    let data = &memory[g2_x_1_index..g2_x_1_index + 4 * 0x20];
+
+    // mstore(add(0x40, vka_end), mload( {{ vk_const_offsets["g2_x_1"]|hex() }}))
+    // mstore(add(0x60, vka_end), mload( {{ vk_const_offsets["g2_x_2"]|hex() }}))
+    // mstore(add(0x80, vka_end), mload( {{ vk_const_offsets["g2_y_1"]|hex() }}))
+    // mstore(add(0xa0, vka_end), mload( {{ vk_const_offsets["g2_y_2"]|hex() }}))
+    let h1 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
+
+    let neg_s_g2_x_1_index = 0x0280 + VKA_OFFSET + 5 * 0x20;
+    let data = &memory[neg_s_g2_x_1_index..neg_s_g2_x_1_index + 4 * 0x20];
+    let h2 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
+    // mstore(add(0x100, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_1"]|hex() }}))
+    // mstore(add(0x120, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_2"]|hex() }}))
+    // mstore(add(0x140, vka_end), mload( {{ vk_const_offsets["neg_s_g2_y_1"]|hex() }}))
+    // mstore(add(0x160, vka_end), mload( {{ vk_const_offsets["neg_s_g2_y_2"]|hex() }}))
+
+    let g2_points = [G2Prepared::from(h1), G2Prepared::from(h2)];
+
+    let product = Bn254::<H>::multi_pairing(g1_points, g2_points);
+
+    if product.0.is_one() {
+        Ok(())
+    } else {
+        Err(VerifyError::VerificationError)
+    }
+
     // success := ec_pairing(
-    //     success,
     //     vka_end,
     //     mload(add(theta_mptr, 0x2c0)),
     //     mload(add(theta_mptr, 0x2e0)),
     //     mload(add(theta_mptr, 0x300)),
     //     mload(add(theta_mptr, 0x320))
     // )
-
-    Ok(())
 }
 
 // Read EC point (x, y) at (proof_cptr, proof_cptr + 0x20)
