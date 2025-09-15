@@ -1,4 +1,6 @@
-use crate::{BYTE_FLAG_BITMASK, G2, PTR_BITMASK};
+use crate::constants::MAX_U32;
+use crate::errors::{GroupError, UtilityError};
+use crate::{BYTE_FLAG_BITMASK, G2, PROOF_OFFSET, PTR_BITMASK};
 use crate::{EVMWord, Fq, Fr, U256, errors::FieldError, types::G1};
 use ark_bn254::Fq2;
 use ark_bn254_ext::CurveHooks;
@@ -108,7 +110,7 @@ impl IntoU256 for EVMWord {
     }
 }
 
-/// Trait for returning a big-endian representation of some object as a `[u8; 32]`.
+/// Trait for returning a big-endian representation of some object as an `EVMWord`.
 pub(crate) trait IntoBEBytes32 {
     fn into_be_bytes32(self) -> EVMWord;
 }
@@ -148,35 +150,26 @@ impl IntoBEBytes32 for u64 {
 // }
 
 // Parse point in G1.
-pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>, ()> {
+pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>, GroupError> {
     if start >= data.len() {
-        println!("error1");
-        return Err(());
+        return Err(GroupError::IndexOutOfBounds {
+            index: start,
+            source_length: data.len(),
+        });
     }
     if data.len() < 64 {
-        println!("error2");
-        return Err(());
+        return Err(GroupError::InvalidSliceLength {
+            actual_length: data.len(),
+            expected_length: 64,
+        });
     }
-
-    println!("reading coordinates...");
-
-    println!("start = 0x{:x?}", start);
 
     let x = Fq::from_be_bytes_mod_order(&data[start..(start + 32)]);
     let y = Fq::from_be_bytes_mod_order(&data[(start + 32)..(start + 64)]);
 
-    println!("x = {}", to_hex_string(&x.into_be_bytes32()));
-    println!("y = {}", to_hex_string(&y.into_be_bytes32()));
-
-    // let x = Fq::from_bigint(read_u256(&data[start..(start + 32)])?).ok_or(())?;
-    // let y = Fq::from_bigint(read_u256(&data[(start + 32)..(start + 64)])?).ok_or(())?;
-
-    println!("successfully read coordinates!");
-
     // If (0, 0) is given, we interpret this as the point at infinity:
     // https://docs.rs/ark-ec/0.5.0/src/ark_ec/models/short_weierstrass/affine.rs.html#212-218
     if x == Fq::ZERO && y == Fq::ZERO {
-        println!("error3");
         return Ok(G1::zero());
     }
 
@@ -184,8 +177,7 @@ pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>,
 
     // Validate point
     if !point.is_on_curve() {
-        println!("error4");
-        return Err(());
+        return Err(GroupError::NotOnCurve);
     }
     // This is always true for G1 with the BN254 curve.
     debug_assert!(point.is_in_correct_subgroup_assuming_on_curve());
@@ -249,24 +241,52 @@ pub(crate) fn lsb32(num: &U256) -> usize {
 }
 
 // TODO: Address edge cases.
-pub(crate) fn mload(memory: &[u8], addr: u32) -> Result<EVMWord, ()> {
+pub(crate) fn mload(memory: &[u8], addr: u32) -> Result<EVMWord, UtilityError> {
     memory
         .get(addr as usize..addr as usize + 32)
         .and_then(|s| s.try_into().ok())
-        .ok_or(())
+        .ok_or(UtilityError::MloadError {
+            index: addr as usize,
+            memory_length: memory.len(),
+        })
+}
+
+// Utility function for parsing a u32 from an EVMWord, while also
+// checking that it does not exceed u32::MAX.
+pub(crate) fn mload_u32(memory: &[u8], addr: u32) -> Result<u32, UtilityError> {
+    let bytes = &mload(&memory, addr)?;
+    // perform validation
+    if bytes.into_u256() > MAX_U32 {
+        return Err(UtilityError::MloadU32Error {
+            value: bytes.into_u256(),
+            index: addr as usize,
+        });
+    }
+    Ok(u32_from_be_tail(bytes))
 }
 
 // TODO: Address edge cases.
 // TODO: Also, better name.
-pub(crate) fn calldataload(raw_proof: &[u8], addr: u32) -> Result<EVMWord, ()> {
-    let idx = addr as usize;
-    let slice = raw_proof.get(idx..idx + 0x20).unwrap();
-    let evm_word: EVMWord = slice.try_into().unwrap();
+pub(crate) fn load_from_proof(raw_proof: &[u8], addr: u32) -> Result<EVMWord, UtilityError> {
+    let idx = addr as usize - PROOF_OFFSET;
+    let slice = raw_proof
+        .get(idx..idx + 0x20)
+        .ok_or(UtilityError::CallDataLoadError {
+            index: idx,
+            raw_proof_length: raw_proof.len(),
+        })?;
+    let evm_word: EVMWord = slice
+        .try_into()
+        .expect("Should be able to convert slice into an EVMWord.");
     Ok(evm_word)
 }
 
 pub(crate) fn u32_from_be_tail(bytes: &EVMWord) -> u32 {
-    u32::from_be_bytes(bytes[28..32].try_into().unwrap())
+    u32::from_be_bytes(
+        bytes[28..32]
+            .try_into()
+            .expect("Should be able to parse the 4 LSBs of an EVMWord as an u32."),
+    )
 }
 
 // Utility for debugging.

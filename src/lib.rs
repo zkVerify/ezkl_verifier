@@ -3,7 +3,7 @@
 
 mod constants;
 mod errors;
-// mod proof;
+mod proof;
 mod types;
 mod utils;
 // mod vk;
@@ -20,11 +20,11 @@ use core::ops::BitAnd;
 use sha3::{Digest, Keccak256};
 
 use crate::{
-    constants::{BYTE_FLAG_BITMASK, DELTA, PTR_BITMASK},
+    constants::{BYTE_FLAG_BITMASK, DELTA, MAX_U32, PTR_BITMASK},
     errors::VerifyError,
     utils::{
-        IntoBEBytes32, IntoFr, IntoU256, calldataload, lsb8, lsb16, lsb32, mload, read_g1, read_g2,
-        to_hex_string, u32_from_be_tail,
+        IntoBEBytes32, IntoFr, IntoU256, load_from_proof, lsb8, lsb16, lsb32, mload, mload_u32,
+        read_g1, read_g2, to_hex_string, u32_from_be_tail,
     },
 };
 
@@ -39,6 +39,11 @@ const MEMORY_OFFSET: usize = 5 * 0x20; // Where the VKA starts inside the memory
 /// A single public input.
 pub type PublicInput = [u8; PUBS_SIZE];
 pub type Public = [PublicInput];
+
+enum ProcessOutput {
+    Index(usize),
+    Scalar(Fr),
+}
 
 pub fn verify<H: CurveHooks>(
     raw_vka: &[u8],
@@ -69,7 +74,7 @@ pub fn verify<H: CurveHooks>(
 
     verify_proof_inner::<H>(&raw_proof, &pubs, &mut memory)
 
-    // TODO: Rescaling Phase (if needed)
+    // TODO: Rescaling Phase (only if needed)
 }
 
 /// Function performing the actual verification.
@@ -80,7 +85,7 @@ fn verify_proof_inner<H: CurveHooks>(
 ) -> Result<(), VerifyError> {
     let theta_mptr: usize;
     let mut proof_cptr: usize = PROOF_OFFSET;
-    let vka_end: usize;
+    let mut vka_end: usize; // TODO: DOUBLE-CHECK THAT MAKING THIS mut DOES NOT BREAK ANYTHING!
 
     {
         // let instance_cptr := instances.offset
@@ -88,10 +93,14 @@ fn verify_proof_inner<H: CurveHooks>(
         // // Check valid length of proof
         // success := and(success, eq(sub(instance_cptr, 0xa4), proof.length))
 
-        vka_end = u32_from_be_tail(&mload(&memory, 0x40).unwrap()) as usize;
+        vka_end = mload_u32(memory, 0x40).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to parse vka_end as u32. Cause: {}", e).to_string(),
+        })? as usize;
 
         // copy the vka_digest to the vka_end location
-        memory.extend_from_slice(&mload(&memory, (VKA_OFFSET + 0xa0) as u32).unwrap());
+        memory.extend_from_slice(
+            &mload(&memory, (VKA_OFFSET + 0xa0) as u32).expect("Should be able to extend memory."),
+        );
 
         // Read instances and witness commitments and generate challenges
         let mut hash_mptr = vka_end + 0x20;
@@ -121,7 +130,7 @@ fn verify_proof_inner<H: CurveHooks>(
             if instance.into_u256() >= Fr::MODULUS {
                 return Err(VerifyError::PublicInputError {
                     message: format!(
-                        "Instance {} exceeds field modulus.",
+                        "Instance {} exceeds scalar field modulus.",
                         to_hex_string(instance)
                     ),
                 });
@@ -144,8 +153,8 @@ fn verify_proof_inner<H: CurveHooks>(
                             proof_cptr = new_proof_cptr;
                             hash_mptr = new_hash_mptr;
                         }
-                        Err(_) => {
-                            return Err(VerifyError::OtherError); // TODO: Rework to use better error propagation
+                        Err(e) => {
+                            return Err(e); // TODO: Rework to use better error propagation
                         }
                     };
                 }
@@ -157,7 +166,9 @@ fn verify_proof_inner<H: CurveHooks>(
                         hash_mptr = new_hash_mptr;
                     }
                     Err(_) => {
-                        return Err(VerifyError::OtherError); // TODO: Rework to use better error propagation
+                        return Err(VerifyError::OtherError {
+                            message: "Failed to squeeze challenge.".to_string(),
+                        }); // TODO: Rework to use better error propagation
                     }
                 };
 
@@ -170,7 +181,9 @@ fn verify_proof_inner<H: CurveHooks>(
                             challenge_mptr = new_challenge_mptr;
                         }
                         Err(_) => {
-                            return Err(VerifyError::OtherError); // TODO: Rework to use better error propagation
+                            return Err(VerifyError::OtherError {
+                                message: "Failed to subsequent squeeze challenge.".to_string(),
+                            }); // TODO: Rework to use better error propagation
                         }
                     };
                 }
@@ -180,7 +193,7 @@ fn verify_proof_inner<H: CurveHooks>(
                 .into_u256();
         }
 
-        // Read evaluations
+        // Read evaluationsrror
         let proof_cptr_end = proof_cptr + num_evals as usize; // num_evals
         while proof_cptr < proof_cptr_end {
             let start = proof_cptr - PROOF_OFFSET;
@@ -209,7 +222,9 @@ fn verify_proof_inner<H: CurveHooks>(
                 hash_mptr = new_hash_mptr;
             }
             Err(_) => {
-                return Err(VerifyError::OtherError); // TODO: Rework to use better error propagation
+                return Err(VerifyError::OtherError {
+                    message: "Failed to squeeze challenge.".to_string(),
+                }); // TODO: Rework to use better error propagation
             }
         };
         // nu
@@ -218,7 +233,9 @@ fn verify_proof_inner<H: CurveHooks>(
                 challenge_mptr = new_challenge_mptr;
             }
             Err(_) => {
-                return Err(VerifyError::OtherError); // TODO: Rework to use better error propagation
+                return Err(VerifyError::OtherError {
+                    message: "Failed to squeeze subsequent challenge.".to_string(),
+                }); // TODO: Rework to use better error propagation
             }
         };
 
@@ -228,8 +245,8 @@ fn verify_proof_inner<H: CurveHooks>(
                 proof_cptr = new_proof_cptr;
                 hash_mptr = new_hash_mptr;
             }
-            Err(_) => {
-                return Err(VerifyError::OtherError); // TODO: Rework to use better error propagation
+            Err(e) => {
+                return Err(e); // TODO: Rework to use better error propagation
             }
         };
 
@@ -240,7 +257,9 @@ fn verify_proof_inner<H: CurveHooks>(
                 hash_mptr = new_hash_mptr;
             }
             Err(_) => {
-                return Err(VerifyError::OtherError); // TODO: Rework to use better error propagation
+                return Err(VerifyError::OtherError {
+                    message: "Failed to squeeze challenge.".to_string(),
+                }); // TODO: Rework to use better error propagation
             }
         };
 
@@ -250,13 +269,14 @@ fn verify_proof_inner<H: CurveHooks>(
                 proof_cptr = new_proof_cptr;
                 hash_mptr = new_hash_mptr;
             }
-            Err(_) => {
-                return Err(VerifyError::OtherError); // TODO: Rework to use better error propagation
+            Err(e) => {
+                return Err(e); // TODO: Rework to use better error propagation
             }
         };
 
         // Read accumulator from instances
         // TODO
+        // todo!()
     }
 
     // Compute Lagrange evaluations and instance evaluation
@@ -292,20 +312,40 @@ fn verify_proof_inner<H: CurveHooks>(
 
         let x_n_mptr = theta_mptr + 0x180;
         let mut mptr = x_n_mptr;
-        let num_instances =
-            u32_from_be_tail(&mload(memory, 0xe0).map_err(|_| VerifyError::KeyError {
+
+        let num_instances = {
+            let num_instances_bytes = &mload(memory, 0xe0).map_err(|_| VerifyError::KeyError {
                 message: format!(
                     "Failed reading num_instances from memory at address 0x{:x?}",
                     0xe0
                 ),
-            })?);
-        let num_neg_lagranges =
-            u32_from_be_tail(&mload(memory, 0x0480).map_err(|_| VerifyError::KeyError {
-                message: format!(
-                    "Failed reading num_neg_lagranges from memory at address 0x{:x?}",
-                    0x0480
-                ),
-            })?);
+            })?;
+            // validation
+            if num_instances_bytes.into_u256() > MAX_U32 {
+                return Err(VerifyError::KeyError {
+                    message: "num_instances_bytes in VKA exceeds u32::MAX".to_string(),
+                });
+            }
+            u32_from_be_tail(&num_instances_bytes)
+        };
+
+        let num_neg_lagranges = {
+            let num_neg_lagranges_bytes =
+                &mload(memory, 0x0480).map_err(|_| VerifyError::KeyError {
+                    message: format!(
+                        "Failed reading num_neg_lagranges from memory at address 0x{:x?}",
+                        0x0480
+                    ),
+                })?;
+            // validation
+            if num_neg_lagranges_bytes.into_u256() > MAX_U32 {
+                return Err(VerifyError::KeyError {
+                    message: "num_neg_lagranges in VKA exceeds u32::MAX".to_string(),
+                });
+            }
+            u32_from_be_tail(&num_neg_lagranges_bytes)
+        };
+
         let mut mptr_end = mptr + 32 * (num_instances + num_neg_lagranges) as usize;
         if num_instances == 0 {
             mptr_end += 0x20;
@@ -404,7 +444,8 @@ fn verify_proof_inner<H: CurveHooks>(
             // for { let code_block := 0 } lt(code_block, computations_len) { code_block := add(code_block, 0x20) } {
             for code_block in (0..computations_len).step_by(0x20) {
                 // call expression_evals to evaluate the expressions in the code block
-                (computations_ptr, expressions_word, last_idx) = expression_evals_packed(
+                let po: ProcessOutput;
+                (computations_ptr, expressions_word, po) = expression_evals_packed(
                     memory,
                     raw_proof,
                     vka_end,
@@ -412,6 +453,16 @@ fn verify_proof_inner<H: CurveHooks>(
                     &mut expressions_word,
                 )
                 .unwrap();
+                match po {
+                    ProcessOutput::Index(ind) => {
+                        last_idx = ind;
+                    }
+                    _ => {
+                        return Err(VerifyError::OtherError {
+                            message: "".to_string(),
+                        });
+                    }
+                }
 
                 // At the end of each code block we update `quotient_eval_numer`
                 // If this is the first code block, we set `quotient_eval_numer` to the last var in the code block
@@ -460,11 +511,7 @@ fn verify_proof_inner<H: CurveHooks>(
             {
                 // Get the first and second LSG bytes from the first permutation_z_evals word to load in (z, _, _)
                 let idx = lsb16(&permutation_z_evals) as u32;
-                let eval = l_0
-                    - l_0
-                        * calldataload(raw_proof, idx - PROOF_OFFSET as u32)
-                            .unwrap()
-                            .into_fr();
+                let eval = l_0 - l_0 * load_from_proof(raw_proof, idx).unwrap().into_fr();
                 quotient_eval_numer = quotient_eval_numer * y + eval;
             }
 
@@ -477,11 +524,7 @@ fn verify_proof_inner<H: CurveHooks>(
                 // let slice = raw_proof.get(idx..idx + 0x20).unwrap();
                 // let eval_bytes: [u8; 32] = slice.try_into().unwrap();
                 // let perm_z_last = eval_bytes.into_fr(); // calldataload(lsb16(&mload(memory, perm_z_last_ptr as u32).unwrap().into_u256()));
-
-                // TODO: Maybe it's a good idea to move the "- PROOF_OFFSET" part inside the calldataload function?
-                let perm_z_last = calldataload(raw_proof, idx - PROOF_OFFSET as u32)
-                    .unwrap()
-                    .into_fr();
+                let perm_z_last = load_from_proof(raw_proof, idx).unwrap().into_fr();
 
                 quotient_eval_numer = quotient_eval_numer * y
                     + mload(memory, theta_mptr as u32 + 0x1C0).unwrap().into_fr()
@@ -560,20 +603,18 @@ fn verify_proof_inner<H: CurveHooks>(
     {
         let first_quotient_x_cptr = 0x0320 + VKA_OFFSET + MEMORY_OFFSET;
         let last_quotient_x_cptr = 0x0300 + VKA_OFFSET + MEMORY_OFFSET;
-        let bytes = calldataload(
+        let bytes = load_from_proof(
             raw_proof,
-            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap())
-                - PROOF_OFFSET as u32,
+            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap()),
         )
         .unwrap();
         // mstore(vka_end, calldataload(mload(0x03a0)))
         memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
 
         // mstore(add(0x20, vka_end), calldataload(add(mload(0x03a0), 0x20)))
-        let bytes = calldataload(
+        let bytes = load_from_proof(
             raw_proof,
-            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap()) + 0x20
-                - PROOF_OFFSET as u32,
+            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap()) + 0x20,
         )
         .unwrap();
         memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
@@ -585,15 +626,15 @@ fn verify_proof_inner<H: CurveHooks>(
         let cptr_end =
             u32_from_be_tail(&mload(memory, first_quotient_x_cptr as u32).unwrap()) - 0x40;
         while cptr_end < cptr {
-            ec_mul_acc::<H>(memory, &x_n).map_err(|_| VerifyError::OtherError)?; // TODO: Replace with better Error variant
+            ec_mul_acc::<H>(memory, &x_n).map_err(|_| VerifyError::OtherError {
+                message: "".to_string(),
+            })?; // TODO: Replace with better Error variant
 
-            let x = Fq::from_be_bytes_mod_order(
-                &calldataload(raw_proof, cptr - PROOF_OFFSET as u32).unwrap(),
-            );
-            let y = Fq::from_be_bytes_mod_order(
-                &calldataload(raw_proof, cptr + 0x20 - PROOF_OFFSET as u32).unwrap(),
-            );
-            ec_add_acc::<H>(memory, &x, &y).map_err(|_| VerifyError::OtherError)?; // TODO: Replace with better Error variant
+            let x = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr).unwrap());
+            let y = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr + 0x20).unwrap());
+            ec_add_acc::<H>(memory, &x, &y).map_err(|_| VerifyError::OtherError {
+                message: "".to_string(),
+            })?; // TODO: Replace with better Error variant
             cptr -= 0x40;
         }
         // mstore(add(theta_mptr, 0x260), mload(vka_end))
@@ -811,7 +852,9 @@ fn verify_proof_inner<H: CurveHooks>(
                         quotient_eval,
                         coeff_ptr as u32,
                     )
-                    .map_err(|_| VerifyError::OtherError)?; // TODO: REVISIT WHEN DOING ERROR HANDLING...
+                    .map_err(|_| VerifyError::OtherError {
+                        message: "".to_string(),
+                    })?; // TODO: REVISIT WHEN DOING ERROR HANDLING...
                     coeff_ptr = coeff_ptr + lsb8(&r_evals_meta_data);
                     r_evals_meta_data >>= 8;
                     if not_first {
@@ -988,22 +1031,14 @@ fn verify_proof_inner<H: CurveHooks>(
 
             // mstore(add(0x80, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
             let idx = 0x80 + vka_end;
-            let bytes = calldataload(
-                raw_proof,
-                (lsb16(&ec_points_cptr_packed) - PROOF_OFFSET) as u32,
-            )
-            .unwrap();
+            let bytes = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32).unwrap();
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
             ec_points_cptr_packed >>= 16;
 
             // mstore(add(0xa0, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
             let idx = 0xa0 + vka_end;
-            let bytes = calldataload(
-                raw_proof,
-                (lsb16(&ec_points_cptr_packed) - PROOF_OFFSET) as u32,
-            )
-            .unwrap();
+            let bytes = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32).unwrap();
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
             ec_points_cptr_packed >>= 16;
@@ -1021,17 +1056,11 @@ fn verify_proof_inner<H: CurveHooks>(
             let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).unwrap());
             ec_add_acc::<H>(memory, &x, &y);
 
-            let w_prime_x = calldataload(
-                raw_proof,
-                (lsb16(&ec_points_cptr_packed) - PROOF_OFFSET) as u32,
-            )
-            .unwrap();
+            let w_prime_x =
+                load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32).unwrap();
             ec_points_cptr_packed >>= 16;
-            let w_prime_y = calldataload(
-                raw_proof,
-                (lsb16(&ec_points_cptr_packed) - PROOF_OFFSET) as u32,
-            )
-            .unwrap();
+            let w_prime_y =
+                load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32).unwrap();
             // mstore(add(0x80, vka_end), w_prime_x)
             let idx = 0x80 + vka_end;
             memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
@@ -1191,14 +1220,14 @@ fn verify_proof_inner<H: CurveHooks>(
     }
 }
 
-// Checks that number of public inputs in the vk, matches the actual length of the PI list.
+// Utility for checking if number of public inputs in the vk matches the actual length of the PI list.
 fn check_public_input_number(memory: &[u8], pubs: &Public) -> Result<(), VerifyError> {
     let num_instances = pubs.len();
     let idx = 0x40 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32;
     let num_instances_in_vka = mload(memory, idx)
         .map_err(|_| VerifyError::KeyError {
             message: format!(
-                "Unable to read num_instances from memory (index: 0x{:x?}).",
+                "Unable to access memory at index 0x{:x?} (num_instances).",
                 idx
             )
             .to_string(),
@@ -1225,18 +1254,29 @@ pub(crate) fn write_ec_point_into_memory<H: CurveHooks>(
     memory: &mut Vec<u8>,
     proof_cptr: usize,
     hash_mptr: usize,
-) -> Result<(usize, usize), ()> {
-    // ret0, ret1, ret2 {
-    let point = read_g1::<H>(proof, proof_cptr - PROOF_OFFSET)?;
+) -> Result<(usize, usize), VerifyError> {
+    let point = read_g1::<H>(proof, proof_cptr - PROOF_OFFSET).map_err(|e| {
+        VerifyError::InvalidProofError {
+            message: format!("Invalid Proof. Unable to read G1 point from proof. Cause: {e}"),
+        }
+    })?;
     // Ensure hash_mptr + 0x20 is not out of bounds
     while hash_mptr + 0x20 >= memory.len() {
         memory.extend_from_slice(&[0u8; 32]);
     }
 
-    memory[hash_mptr..hash_mptr + 0x20]
-        .copy_from_slice(&point.x().expect("Should succeed").into_be_bytes32());
-    memory[(hash_mptr + 0x20)..(hash_mptr + 0x40)]
-        .copy_from_slice(&point.y().expect("Should succeed").into_be_bytes32());
+    memory[hash_mptr..hash_mptr + 0x20].copy_from_slice(
+        &point
+            .x()
+            .expect("Slices have the same length")
+            .into_be_bytes32(),
+    );
+    memory[(hash_mptr + 0x20)..(hash_mptr + 0x40)].copy_from_slice(
+        &point
+            .y()
+            .expect("Slices have the same length")
+            .into_be_bytes32(),
+    );
 
     Ok((proof_cptr + 0x40, hash_mptr + 0x40))
 }
@@ -1316,7 +1356,7 @@ fn expression_evals_packed(
     fsmp: usize,
     code_ptr: usize,
     expressions_word: &U256,
-) -> Result<(usize, U256, usize), ()> {
+) -> Result<(usize, U256, ProcessOutput), ()> {
     // Load in the least significant byte of the `expressions_word` word to get the total number of words we will need to load in.
     let num_words_shift_up_one = (0x20 * lsb8(expressions_word) + 0x20) as u32;
 
@@ -1338,7 +1378,7 @@ fn expression_evals_packed(
                 0x00 => {
                     expressions_word >>= 8;
                     // Load the calldata ptr from the expression, which come from the 2nd and 3rd least significant bytes.
-                    let idx = lsb16(&expressions_word) - PROOF_OFFSET; // (expressions_word.0[0] & PTR_BITMASK) as usize - PROOF_OFFSET;
+                    let idx = lsb16(&expressions_word) - PROOF_OFFSET;
                     memory[mstore_ptr..mstore_ptr + 0x20]
                         .copy_from_slice(&raw_proof.get(idx..idx + 0x20).unwrap());
 
@@ -1349,15 +1389,13 @@ fn expression_evals_packed(
                 0x01 => {
                     expressions_word >>= 8;
                     // Load the memory ptr from the expression, which come from the 2nd and 3rd least significant bytes
-                    let idx = lsb16(&expressions_word) - PROOF_OFFSET; // (expressions_word.0[0] & PTR_BITMASK) as usize - PROOF_OFFSET;
+                    let idx = lsb16(&expressions_word) - PROOF_OFFSET;
                     let temp = &mload(memory, idx as u32)
                         .unwrap()
                         .into_fr()
                         .neg_in_place()
                         .into_be_bytes32();
-
                     memory[mstore_ptr..mstore_ptr + 0x20].copy_from_slice(temp);
-                    // mstore(mstore_ptr, sub(R, mload(expressions_word.0[0] & PTR_BITMASK)))
                     // Move to the next expression
                     expressions_word >>= 16;
                 }
@@ -1369,12 +1407,9 @@ fn expression_evals_packed(
                         .unwrap()
                         .into_fr();
                     // Load the rhs operand memory ptr from the expression, which comes from the 4th and 5th least significant bytes
-                    let rhs = mload(
-                        memory,
-                        lsb16(&(expressions_word >> 16)) as u32, // ((*expressions_word >> 16).0[0] & PTR_BITMASK) as u32,
-                    )
-                    .unwrap()
-                    .into_fr();
+                    let rhs = mload(memory, lsb16(&(expressions_word >> 16)) as u32)
+                        .unwrap()
+                        .into_fr();
 
                     memory[mstore_ptr..mstore_ptr + 0x20]
                         .copy_from_slice(&(lhs + rhs).into_be_bytes32());
@@ -1398,18 +1433,18 @@ fn expression_evals_packed(
                     // Move to the next expression
                     expressions_word >>= 32;
                 }
-                // TODO: RESTORE!
                 // 0x04 => (For lookup expressions) Start accumulator evaluations for the lookup (table or input)
                 // Will always occur at the end of the last word of the lookup expression.
-                // 0x04 => {
-                //     return Ok(lookup_input_accum(
-                //         memory,
-                //         expressions_word,
-                //         // fsmp,
-                //         i as usize,
-                //         code_ptr,
-                //     ));
-                // }
+                0x04 => {
+                    let (res1, res2, res3) = lookup_input_accum(
+                        memory,
+                        &expressions_word,
+                        // fsmp,
+                        i as usize,
+                        code_ptr,
+                    )?;
+                    return Ok((res1, res2, ProcessOutput::Scalar(res3)));
+                }
                 _ => {
                     // Invalid opcode
                     return Err(()); // TODO: define proper error
@@ -1424,7 +1459,7 @@ fn expression_evals_packed(
     let ret1 = expressions_word;
     let ret2 = (acc - 0x20) as usize;
 
-    Ok((ret0, ret1, ret2))
+    Ok((ret0, ret1, ProcessOutput::Index(ret2)))
 }
 
 fn lookup_input_accum(
@@ -1433,7 +1468,7 @@ fn lookup_input_accum(
     // fsmp: usize,
     i: usize,
     code_ptr: usize,
-) -> (usize, U256, Fr) {
+) -> Result<(usize, U256, Fr), ()> {
     let mut ret0: usize = 0;
     let ret1: U256;
     let ret2: Fr;
@@ -1467,7 +1502,7 @@ fn lookup_input_accum(
     ret1 = expressions_word;
     ret2 = a;
 
-    (ret0, ret1, ret2)
+    Ok((ret0, ret1, ret2))
 }
 
 fn z_evals(
@@ -1498,10 +1533,10 @@ fn z_evals(
     while permutation_z_evals_ptr < perm_z_last_ptr {
         let next_z_ptr = permutation_z_evals_ptr + num_words;
         let z_j = mload(memory, next_z_ptr as u32).unwrap().into_u256();
-        let lhs = calldataload(raw_proof, (lsb16(&z_j) - PROOF_OFFSET) as u32)
+        let lhs = load_from_proof(raw_proof, (lsb16(&z_j)) as u32)
             .unwrap()
             .into_fr();
-        let rhs = calldataload(raw_proof, (lsb16(&(z >> 32)) - PROOF_OFFSET) as u32)
+        let rhs = load_from_proof(raw_proof, (lsb16(&(z >> 32))) as u32)
             .unwrap()
             .into_fr();
         quotient_eval_numer = quotient_eval_numer * y + l_0 * (lhs - rhs);
@@ -1532,9 +1567,10 @@ fn z_evals(
     );
 
     // iterate through col_evals to update the quotient_eval_numer accumulator
-    let temp = u32_from_be_tail(&mload(memory, 0x40).unwrap()) + 0x20;
+    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap()); // free memory pointer
+    let temp = fmp + 0x20;
     let end_ptr = u32_from_be_tail(&mload(memory, temp).unwrap()) as usize;
-    let start = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize + 0x40;
+    let start = fmp as usize + 0x40;
     for j in (start..end_ptr).step_by(0x20) {
         quotient_eval_numer = quotient_eval_numer * y + mload(memory, j as u32).unwrap().into_fr();
     }
@@ -1557,11 +1593,13 @@ fn col_evals(
     let l_blind = mload(memory, theta_mptr as u32 + 0x1e0).unwrap().into_fr();
     let i_eval = mload(memory, theta_mptr as u32 + 0x220).unwrap().into_fr();
 
+    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap()); // free memory pointer
+
     // Extract the index 1 and index 0 z evaluations from the z word.
-    let mut lhs = calldataload(raw_proof, (lsb16(&(z >> 16)) - PROOF_OFFSET) as u32)
+    let mut lhs = load_from_proof(raw_proof, (lsb16(&(z >> 16))) as u32)
         .unwrap()
         .into_fr();
-    let mut rhs = calldataload(raw_proof, (lsb16(&z) - PROOF_OFFSET) as u32)
+    let mut rhs = load_from_proof(raw_proof, (lsb16(&z)) as u32)
         .unwrap()
         .into_fr();
 
@@ -1572,33 +1610,24 @@ fn col_evals(
             let mut eval = i_eval;
 
             if lsb8(&z) == 0x00 {
-                eval = calldataload(raw_proof, (lsb16(&(z >> 8)) - PROOF_OFFSET) as u32)
+                eval = load_from_proof(raw_proof, (lsb16(&(z >> 8))) as u32)
                     .unwrap()
                     .into_fr();
             }
 
-            lhs = lhs
-                * (eval
-                    + beta
-                        * calldataload(raw_proof, (lsb16(&(z >> 24)) - PROOF_OFFSET) as u32)
-                            .unwrap()
-                            .into_fr()
-                    + gamma);
-            rhs = rhs
-                * (eval
-                    + mload(memory, u32_from_be_tail(&mload(memory, 0x40).unwrap()))
+            lhs *= eval
+                + beta
+                    * load_from_proof(raw_proof, (lsb16(&(z >> 24))) as u32)
                         .unwrap()
                         .into_fr()
-                    + gamma);
+                + gamma;
+            rhs *= eval + mload(memory, fmp).unwrap().into_fr() + gamma;
 
             z >>= 40;
 
             // mstore(mload(0x40), mulmod(mload(mload(0x40)), DELTA, R))
-            let idx = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
-            let val = DELTA
-                * mload(memory, u32_from_be_tail(&mload(memory, 0x40).unwrap()))
-                    .unwrap()
-                    .into_fr();
+            let idx = fmp as usize;
+            let val = DELTA * mload(memory, fmp).unwrap().into_fr();
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
         }
         z = mload(memory, (permutation_z_evals_ptr + j + 0x20) as u32)
@@ -1607,130 +1636,181 @@ fn col_evals(
     }
     let left_sub_right = lhs - rhs;
 
-    let fsm_ptr = u32_from_be_tail(
-        &mload(
-            memory,
-            u32_from_be_tail(&mload(memory, 0x40 as u32).unwrap()) + 0x20,
-        )
-        .unwrap(),
-    ) as usize;
+    let fsm_ptr = u32_from_be_tail(&mload(memory, fmp + 0x20).unwrap()) as usize;
 
     let val = left_sub_right - left_sub_right * (l_last + l_blind);
     memory[fsm_ptr..fsm_ptr + 0x20].copy_from_slice(&val.into_be_bytes32());
 
-    let idx = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize + 0x20;
+    let idx = fmp as usize + 0x20;
     memory[idx..idx + 0x20].copy_from_slice(&(fsm_ptr + 0x20).into_u256().into_be_bytes32());
 }
 
 // TODO: Re-assess types of ret0, ret1, ret2; also for expression_evals_packed
-// fn lookup_expr_evals_packed(fsmp, code_ptr, expressions_word, mv) -> Result<(usize, U256, Fr), ()> {
-//     // expression evaluation.
-//     let (ret0, ret1, ret2: Fr) = expression_evals_packed(memory, raw_proof, fsmp, code_ptr, expressions_word)?;
-//     if mv != 0 {
-//         // add the beta accum addmod if mv lookup
-//         ret2 = addmod(ret2, mload(memory, (u32_from_be_tail(mload(memory, 0x40).unwrap()) + 0x80)), R)
-//     }
-// }
+fn lookup_expr_evals_packed(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    fsmp: u32,
+    code_ptr: u32,
+    expressions_word: U256,
+    mv: bool,
+) -> Result<(usize, U256, Fr), ()> {
+    // expression evaluation.
+    let (ret0, ret1, ret2) = expression_evals_packed(
+        memory,
+        raw_proof,
+        fsmp as usize,
+        code_ptr as usize,
+        &expressions_word,
+    )?;
 
-// fn mv_lookup_evals(memory: &mut [u8], raw_proof: &[u8], table: U256, mut evals_ptr: usize, quotient_eval_numer: Fr, y: Fr) -> ret0, ret1, ret2 {
-//     // iterate through the input_tables_len
-//     let evals = mload(memory, evals_ptr as u32).unwrap().into_be_bytes32();
-//     // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
-//     let new_table = lsb8(&evals);
-//     evals >>= 8;
-//     let phi = lsb16(evals);
-//     let tmp = calldataload(raw_proof, phi as u32 - PROOF_OFFSET);
-//     // quotient_eval_numer := addmod(
-//     //     mulmod(quotient_eval_numer * y, R),
-//     //     mulmod(mload(add(0x20, mload(0x40))), calldataload(phi), R),
-//     //     R
-//     // )
-//     quotient_eval_numer = quotient_eval_numer * y
-//         + mload(memory, 0x20 + u32_from_be_tail(mload(memory, 0x40).unwrap())).unwrap().into_fr() * tmp;
-//     // quotient_eval_numer := addmod(
-//     //     mulmod(quotient_eval_numer, y, R),
-//     //     mulmod(mload(mload(memory, 0x40).unwrap), tmp, R),
-//     //     R
-//     // )
-//     quotient_eval_numer = quotient_eval_numer * y
-//         + mload(memory, u32_from_be_tail(mload(memory, 0x40).unwrap())).unwrap().into_fr() * tmp;
-//     // load in the lookup_table_lines from the evals_ptr
-//     evals_ptr += 0x20;
-//     // Due to the fact that lookups can share the previous table, we can cache it for reuse.
-//     let input_expression = mload(memory, evals_ptr as u32).unwrap();
-//     if new_table != 0 {
-//         evals_ptr, input_expression, table = lookup_expr_evals_packed(add(0xa0, mload(0x40)), evals_ptr, mload(evals_ptr), 0x1)
-//     }
-//     // outer inputs len, stored in the first input expression word
-//     let outer_inputs_len := and(input_expression, PTR_BITMASK)
-//     input_expression := shr(16, input_expression)
-//     // shift up the inputs iterator by the free static memory offset of 0xa0
-//     for { let j := add(0xa0, mload(0x40)) } lt(j, add(outer_inputs_len, add(0xa0, mload(0x40)))) { j := add(j, 0x20) } {
-//         // call the expression_evals function to evaluate the input_lines
-//         let ident
-//         evals_ptr, input_expression, ident := lookup_expr_evals_packed(j, evals_ptr, input_expression, 0x1)
-//         // store ident in free static memory
-//         mstore(j, ident)
-//     }
-//     let lhs
-//     let rhs
-//     switch eq(outer_inputs_len, 0x20)
-//     case 1 {
-//         rhs := table
-//     } default {
-//         // iterate through the outer_inputs_len
-//         let last_idx := sub(outer_inputs_len, 0x20)
-//         for { let i := 0 } lt(i, outer_inputs_len) { i := add(i, 0x20) } {
-//             let tmp := mload(add(0xa0, mload(0x40)))
-//             let j := 0x20
-//             if eq(i, 0){
-//                 tmp := mload(add(0xc0, mload(0x40)))
-//                 j := 0x40
-//             }
-//             for { } lt(j, outer_inputs_len) { j := add(j, 0x20) } {
-//                 if eq(i, j) {
-//                     continue
-//                 }
-//                 tmp := mulmod(tmp, mload(add(j, add(0xa0, mload(0x40)))), R)
+    match ret2 {
+        ProcessOutput::Scalar(s) => {
+            let mut ret2: Fr = s;
+            if mv {
+                let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+                // add the beta accum addmod if mv lookup
+                ret2 += mload(memory, fmp + 0x80).unwrap().into_fr();
+            }
 
-//             }
-//             rhs := addmod(rhs, tmp, R)
-//             if eq(i, last_idx) {
-//                 rhs := mulmod(rhs, table, R)
-//             }
-//         }
-//     }
-//     let tmp := mload(add(0xa0, mload(0x40)))
-//     for { let j := 0x20 } lt(j, outer_inputs_len) { j := add(j, 0x20) } {
-//         tmp := mulmod(tmp, mload(add(j, add(0xa0, mload(0x40)))), R)
-//     }
-//     rhs := addmod(
-//         rhs,
-//         sub(R, mulmod(calldataload(and(shr(32, evals), PTR_BITMASK)), tmp, R)),
-//         R
-//     )
-//     lhs := mulmod(
-//         mulmod(table, tmp, R),
-//         addmod(calldataload(and(shr(16, evals), PTR_BITMASK)), sub(R, calldataload(phi)), R),
-//         R
-//     )
-//     quotient_eval_numer := addmod(
-//         mulmod(quotient_eval_numer, y, R),
-//         mulmod(
-//             addmod(
-//                 1,
-//                 sub(R, addmod(mload(add(0x40, mload(0x40))), mload(mload(0x40)), R)),
-//                 R
-//             ),
-//             addmod(lhs, sub(R, rhs), R),
-//             R
-//         ),
-//         R
-//     )
-//     ret0 := evals_ptr
-//     ret1 := table
-//     ret2 := quotient_eval_numer
-// }
+            Ok((ret0, ret1, ret2))
+        }
+        _ => Err(()), // TODO: PROPER ERROR HANDLING...
+    }
+}
+
+fn mv_lookup_evals(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    mut table: Fr,
+    mut evals_ptr: usize,
+    mut quotient_eval_numer: Fr,
+    y: Fr,
+) -> Result<(usize, Fr, Fr), ()> {
+    // load the free memory pointer
+    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    // iterate through the input_tables_len
+    let mut evals = mload(memory, evals_ptr as u32).unwrap().into_u256();
+    // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
+    let new_table = lsb8(&evals);
+    evals >>= 8;
+    let phi = lsb16(&evals);
+
+    let tmp1 = mload(memory, 0x20 + fmp).unwrap().into_fr();
+    let tmp2 = load_from_proof(raw_proof, phi as u32).unwrap().into_fr();
+    quotient_eval_numer = quotient_eval_numer * y + tmp1 * tmp2;
+
+    let tmp1 = mload(memory, fmp).unwrap().into_fr();
+    quotient_eval_numer = quotient_eval_numer * y + tmp1 * tmp2;
+
+    // load in the lookup_table_lines from the evals_ptr
+    evals_ptr += 0x20;
+    // Due to the fact that lookups can share the previous table, we can cache it for reuse.
+    let mut input_expression = mload(memory, evals_ptr as u32).unwrap().into_u256();
+    if new_table != 0 {
+        (evals_ptr, input_expression, table) = lookup_expr_evals_packed(
+            memory,
+            raw_proof,
+            0xa0 + fmp,
+            evals_ptr as u32,
+            mload(memory, evals_ptr as u32).unwrap().into_u256(),
+            true,
+        )?; // TODO: Error handling...
+    }
+    // outer inputs len, stored in the first input expression word
+    let outer_inputs_len = lsb16(&input_expression);
+    input_expression >>= 16;
+    // shift up the inputs iterator by the free static memory offset of 0xa0
+    // for { let j := 0xa0 + fmp } lt(j, outer_inputs_len + 0xa0 + fmp) { j := add(j, 0x20) } {
+    for j in
+        ((0xa0 + fmp as usize)..(outer_inputs_len as usize + 0xa0 + fmp as usize)).step_by(0x20)
+    {
+        // call the expression_evals function to evaluate the input_lines
+        let ident: Fr;
+        (evals_ptr, input_expression, ident) = lookup_expr_evals_packed(
+            memory,
+            raw_proof,
+            j as u32,
+            evals_ptr as u32,
+            input_expression,
+            true,
+        )?; // TODO: Error handling...
+        // store ident in free static memory
+        // mstore(j, ident)
+        memory[j..j + 0x20].copy_from_slice(&ident.into_be_bytes32());
+    }
+    let lhs;
+    let mut rhs = Fr::ZERO;
+
+    if outer_inputs_len == 0x20 {
+        rhs = table;
+    } else {
+        // iterate through the outer_inputs_len
+        let last_idx = outer_inputs_len - 0x20;
+        // for { let i := 0 } lt(i, outer_inputs_len) { i := add(i, 0x20) } {
+        for i in (0..outer_inputs_len).step_by(0x20) {
+            let mut tmp = mload(memory, 0xa0 + fmp).unwrap().into_fr();
+            let mut j = 0x20;
+            if i == 0 {
+                tmp = mload(memory, 0xc0 + fmp).unwrap().into_fr();
+                j = 0x40;
+            }
+            // for { } lt(j, outer_inputs_len) { j := add(j, 0x20) } {
+            while j < outer_inputs_len {
+                if i == j {
+                    continue;
+                }
+                tmp *= mload(memory, j as u32 + 0xa0 + fmp).unwrap().into_fr();
+                j += 0x20;
+            }
+            rhs += tmp;
+            if i == last_idx {
+                rhs *= table;
+            }
+        }
+    }
+
+    let mut tmp = mload(memory, 0xa0 + fmp).unwrap().into_fr();
+    // for { let j := 0x20 } lt(j, outer_inputs_len) { j := add(j, 0x20) } {
+    for j in (0x20..outer_inputs_len).step_by(0x20) {
+        tmp *= mload(memory, j as u32 + 0xa0 + fmp).unwrap().into_fr();
+    }
+    rhs = rhs
+        - load_from_proof(raw_proof, (lsb16(&(evals >> 32))) as u32)
+            .unwrap()
+            .into_fr()
+            * tmp;
+    lhs = table
+        * tmp
+        * (load_from_proof(raw_proof, (lsb16(&(evals >> 16))) as u32)
+            .unwrap()
+            .into_fr()
+            - load_from_proof(raw_proof, phi as u32).unwrap().into_fr());
+
+    // quotient_eval_numer := addmod(
+    //                 mulmod(quotient_eval_numer, y, R),
+    //                 mulmod(
+    //                     addmod(
+    //                         1,
+    //                         sub(R, addmod(mload(add(0x40, mload(0x40))), mload(mload(0x40)), R)),
+    //                         R
+    //                     ),
+    //                     addmod(lhs, sub(R, rhs), R),
+    //                     R
+    //                 ),
+    //                 R
+    //             )
+
+    quotient_eval_numer = quotient_eval_numer * y
+        + (Fr::ONE
+            - (mload(memory, 0x40 + fmp).unwrap().into_fr()
+                + mload(memory, fmp).unwrap().into_fr()))
+            * (lhs - rhs);
+    // ret0 := evals_ptr
+    // ret1 := table
+    // ret2 := quotient_eval_numer
+
+    Ok((evals_ptr, table, quotient_eval_numer))
+}
 
 // function lookup_evals(table, evals_ptr, quotient_eval_numer, y) -> ret0, ret1, ret2 {
 //     // iterate through the input_tables_len
@@ -1964,19 +2044,17 @@ fn ec_mul_tmp<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
 fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256) -> U256 {
     let coeff_len = lsb8(&coeff_len_data);
     let ret = coeff_len_data >> 8;
+
+    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
     match coeff_len {
         0x01 => {
             // We only encode the points if the coeff length is greater than 1.
-            // Otherwise we just encode the mu_minus_point and coeff ptr.
+            // Otherwise, we just encode the mu_minus_point and coeff ptr.
             // mstore(add(and(shr(16, coeff_data), PTR_BITMASK), mload(0x40)), mod(mload(add(and(coeff_data, PTR_BITMASK), mload(0x40))), R))
-            let idx = lsb16(&(coeff_data >> 16))
-                + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
-            let val = mload(
-                memory,
-                lsb16(&coeff_data) as u32 + u32_from_be_tail(&mload(memory, 0x40).unwrap()),
-            )
-            .unwrap()
-            .into_fr();
+            let idx = lsb16(&(coeff_data >> 16)) + fmp as usize;
+            let val = mload(memory, lsb16(&coeff_data) as u32 + fmp)
+                .unwrap()
+                .into_fr();
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
         }
         _ => {
@@ -1985,8 +2063,7 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
             for i in 0..coeff_len {
                 let mut first: usize = 0x01;
                 let mut offset_base = i as u32 * 16;
-                let idx = lsb16(&(coeff_data >> offset_base)) as u32
-                    + u32_from_be_tail(&mload(memory, 0x40).unwrap());
+                let idx = lsb16(&(coeff_data >> offset_base)) as u32 + fmp;
                 let point_i = mload(memory, idx).unwrap().into_fr();
                 for j in 0..coeff_len {
                     if j == i {
@@ -1994,38 +2071,23 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
                     }
                     if first != 0 {
                         coeff = point_i
-                            - mload(
-                                memory,
-                                lsb16(&(coeff_data >> (16 * j as u32))) as u32
-                                    + u32_from_be_tail(&mload(memory, 0x40).unwrap()),
-                            )
-                            .unwrap()
-                            .into_fr();
+                            - mload(memory, lsb16(&(coeff_data >> (16 * j as u32))) as u32 + fmp)
+                                .unwrap()
+                                .into_fr();
                         first = 0;
                         continue;
                     }
-                    coeff = coeff
-                        * (point_i
-                            - mload(
-                                memory,
-                                lsb16(&(coeff_data >> (16 * j as u32))) as u32
-                                    + u32_from_be_tail(&mload(memory, 0x40).unwrap()),
-                            )
+                    coeff *= point_i
+                        - mload(memory, lsb16(&(coeff_data >> (16 * j as u32))) as u32 + fmp)
                             .unwrap()
-                            .into_fr());
+                            .into_fr();
                 }
                 offset_base += offset_aggr as u32;
-                coeff = coeff
-                    * mload(
-                        memory,
-                        lsb16(&(coeff_data >> offset_base)) as u32
-                            + u32_from_be_tail(&mload(memory, 0x40).unwrap()),
-                    )
+                coeff *= mload(memory, lsb16(&(coeff_data >> offset_base)) as u32 + fmp)
                     .unwrap()
                     .into_fr();
                 offset_base += offset_aggr as u32;
-                let idx = lsb16(&(coeff_data >> offset_base))
-                    + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
+                let idx = lsb16(&(coeff_data >> offset_base)) + fmp as usize;
                 memory[idx..idx + 0x20].copy_from_slice(&coeff.into_be_bytes32());
             }
         }
@@ -2042,8 +2104,10 @@ fn r_evals_computation(
     zeta: Fr,
     quotient_eval: Fr,
     coeff_ptr: u32,
-) -> Result<(Fr, usize), ()> {
-    let mut r_evals_data = mload(memory, r_evals_data_ptr).unwrap().into_u256();
+) -> Result<(Fr, usize), String> {
+    let mut r_evals_data = mload(memory, r_evals_data_ptr)
+        .map_err(|e| format!("r_evals_computation failed. Cause: {}", e))?
+        .into_u256();
     // number of words to encode the data needed for this set in the r_evals computation.
     let num_words = lsb8(&r_evals_data) as u32;
     r_evals_data >>= 8;
@@ -2059,7 +2123,7 @@ fn r_evals_computation(
                 quotient_eval,
                 coeff_ptr,
             )
-            .map_err(|_| ())?;
+            .map_err(|e| format!("r_evals_computation failed. Cause: {}", e))?;
             Ok((ret0, ret1))
         }
         _ => {
@@ -2073,7 +2137,7 @@ fn r_evals_computation(
                 zeta,
                 coeff_ptr,
             )
-            .map_err(|_| ())?;
+            .map_err(|e| format!("r_evals_computation failed. Cause: {}", e))?;
             Ok((ret0, ret1))
         }
     }
@@ -2088,12 +2152,14 @@ fn single_rot_set(
     zeta: Fr,
     quotient_eval: Fr,
     coeff_ptr: u32,
-) -> Result<(Fr, usize), ()> {
-    let coeff = mload(memory, coeff_ptr).unwrap().into_fr();
+) -> Result<(Fr, usize), String> {
+    let coeff = mload(memory, coeff_ptr)
+        .map_err(|e| format!("single_rot_set failed. Cause: {}", e))?
+        .into_fr();
     let mut r_eval = Fr::ZERO;
     r_eval += coeff
-        * calldataload(raw_proof, (lsb16(&r_evals_data) - PROOF_OFFSET) as u32)
-            .unwrap()
+        * load_from_proof(raw_proof, lsb16(&r_evals_data) as u32)
+            .map_err(|e| format!("single_rot_set failed. Cause: {}", e))?
             .into_fr();
     r_evals_data >>= 16;
     r_eval *= zeta;
@@ -2106,8 +2172,8 @@ fn single_rot_set(
                 for _ in 0..eval_group_len {
                     r_eval = r_eval * zeta
                         + coeff
-                            * calldataload(raw_proof, (lsb16(&r_evals_data) - PROOF_OFFSET) as u32)
-                                .unwrap()
+                            * load_from_proof(raw_proof, (lsb16(&r_evals_data)) as u32)
+                                .map_err(|e| format!("single_rot_set failed. Cause: {}", e))?
                                 .into_fr();
                     r_evals_data >>= 16;
                 }
@@ -2118,8 +2184,8 @@ fn single_rot_set(
                 while mptr_end < mptr {
                     r_eval = r_eval * zeta
                         + coeff
-                            * calldataload(raw_proof, (mptr - PROOF_OFFSET) as u32)
-                                .unwrap()
+                            * load_from_proof(raw_proof, mptr as u32)
+                                .map_err(|e| format!("single_rot_set failed. Cause: {}", e))?
                                 .into_fr();
                     mptr -= 0x20;
                 }
@@ -2127,7 +2193,9 @@ fn single_rot_set(
             }
         }
         ptr += 0x20;
-        r_evals_data = mload(memory, ptr).unwrap().into_u256();
+        r_evals_data = mload(memory, ptr)
+            .map_err(|e| format!("single_rot_set failed. Cause: {}", e))?
+            .into_u256();
     }
 
     Ok((r_eval, ptr as usize))
@@ -2142,14 +2210,16 @@ fn multi_rot_set(
     rot_len: u32,
     zeta: Fr,
     coeff_ptr: u32,
-) -> Result<(Fr, usize), ()> {
+) -> Result<(Fr, usize), String> {
     let mut r_eval = Fr::ZERO;
     for i in 0..num_words {
         while !r_evals_data.is_zero() {
             for j in (0..rot_len).step_by(0x20) {
-                r_eval += mload(memory, coeff_ptr + j).unwrap().into_fr()
-                    * calldataload(raw_proof, (lsb16(&r_evals_data) - PROOF_OFFSET) as u32)
-                        .unwrap()
+                r_eval += mload(memory, coeff_ptr + j)
+                    .map_err(|e| format!("multi_rot_set failed. Cause: {}", e))?
+                    .into_fr()
+                    * load_from_proof(raw_proof, lsb16(&r_evals_data) as u32)
+                        .map_err(|e| format!("multi_rot_set failed. Cause: {}", e))?
                         .into_fr();
                 r_evals_data >>= 16;
             }
@@ -2159,7 +2229,9 @@ fn multi_rot_set(
             }
         }
         ptr += 0x20;
-        r_evals_data = mload(memory, ptr).unwrap().into_u256();
+        r_evals_data = mload(memory, ptr)
+            .map_err(|e| format!("multi_rot_set failed. Cause: {}", e))?
+            .into_u256();
     }
 
     Ok((r_eval, ptr as usize))
@@ -2173,15 +2245,16 @@ fn pairing_input_computations_first<H: CurveHooks>(
     mut data: U256,
     theta_mptr: u32,
 ) -> Result<(), ()> {
+    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
     // mstore(mload(0x40), calldataload(and(data, PTR_BITMASK)))
-    let idx = u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
-    let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
+    let idx = fmp as usize;
+    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
     // mstore(add(0x20, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
-    let idx = 0x20 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
-    let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
+    let idx = 0x20 + fmp as usize;
+    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
@@ -2219,11 +2292,10 @@ fn pairing_input_computations_first<H: CurveHooks>(
                                 let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
                                 ec_mul_acc::<H>(memory, &s)?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &calldataload(raw_proof, (mptr - PROOF_OFFSET) as u32).unwrap(),
+                                    &load_from_proof(raw_proof, mptr as u32).unwrap(),
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &calldataload(raw_proof, (mptr + 0x20 - PROOF_OFFSET) as u32)
-                                        .unwrap(),
+                                    &load_from_proof(raw_proof, (mptr + 0x20) as u32).unwrap(),
                                 );
                                 ec_add_acc::<H>(memory, &x, &y)?;
                                 mptr -= 0x40;
@@ -2265,15 +2337,10 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
                             ec_mul_acc::<H>(memory, &s)?;
                             let x = Fq::from_be_bytes_mod_order(
-                                &calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32)
-                                    .unwrap(),
+                                &load_from_proof(raw_proof, lsb16(&data) as u32).unwrap(),
                             );
                             let y = Fq::from_be_bytes_mod_order(
-                                &calldataload(
-                                    raw_proof,
-                                    (lsb16(&(data >> 16)) - PROOF_OFFSET) as u32,
-                                )
-                                .unwrap(),
+                                &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32).unwrap(),
                             );
                             ec_add_acc::<H>(memory, &x, &y)?;
                             if comm_len == 0x02 {
@@ -2281,15 +2348,11 @@ fn pairing_input_computations_first<H: CurveHooks>(
                                 let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
                                 ec_mul_acc::<H>(memory, &s)?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32)
-                                        .unwrap(),
+                                    &load_from_proof(raw_proof, lsb16(&data) as u32).unwrap(),
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &calldataload(
-                                        raw_proof,
-                                        (lsb16(&(data >> 16)) - PROOF_OFFSET) as u32,
-                                    )
-                                    .unwrap(),
+                                    &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32)
+                                        .unwrap(),
                                 );
                                 ec_add_acc::<H>(memory, &x, &y)?;
                             }
@@ -2330,15 +2393,16 @@ fn pairing_input_computations<H: CurveHooks>(
     mut data: U256,
     theta_mptr: u32,
 ) -> Result<(), ()> {
+    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
     // mstore(add(0x80, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
-    let idx = 0x80 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
-    let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
+    let idx = 0x80 + fmp as usize;
+    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
     // mstore(add(0xa0, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
-    let idx = 0xa0 + u32_from_be_tail(&mload(memory, 0x40).unwrap()) as usize;
-    let bytes = calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32).unwrap();
+    let idx = 0xa0 + fmp as usize;
+    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
@@ -2376,10 +2440,10 @@ fn pairing_input_computations<H: CurveHooks>(
                                 let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
                                 ec_mul_tmp::<H>(memory, &s);
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &calldataload(raw_proof, mptr as u32).unwrap(),
+                                    &load_from_proof(raw_proof, mptr as u32).unwrap(),
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &calldataload(raw_proof, mptr as u32 + 0x20).unwrap(),
+                                    &load_from_proof(raw_proof, mptr as u32 + 0x20).unwrap(),
                                 );
                                 ec_add_tmp::<H>(memory, &x, &y);
                                 mptr -= 0x40;
@@ -2421,15 +2485,10 @@ fn pairing_input_computations<H: CurveHooks>(
                             let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
                             ec_mul_tmp::<H>(memory, &s);
                             let x = Fq::from_be_bytes_mod_order(
-                                &calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32)
-                                    .unwrap(),
+                                &load_from_proof(raw_proof, lsb16(&data) as u32).unwrap(),
                             );
                             let y = Fq::from_be_bytes_mod_order(
-                                &calldataload(
-                                    raw_proof,
-                                    (lsb16(&(data >> 16)) - PROOF_OFFSET) as u32,
-                                )
-                                .unwrap(),
+                                &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32).unwrap(),
                             );
                             ec_add_tmp::<H>(memory, &x, &y);
                             if comm_len == 0x2 {
@@ -2437,15 +2496,11 @@ fn pairing_input_computations<H: CurveHooks>(
                                 let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
                                 ec_mul_tmp::<H>(memory, &s);
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &calldataload(raw_proof, (lsb16(&data) - PROOF_OFFSET) as u32)
-                                        .unwrap(),
+                                    &load_from_proof(raw_proof, lsb16(&data) as u32).unwrap(),
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &calldataload(
-                                        raw_proof,
-                                        (lsb16(&(data >> 16)) - PROOF_OFFSET) as u32,
-                                    )
-                                    .unwrap(),
+                                    &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32)
+                                        .unwrap(),
                                 );
                                 ec_add_tmp::<H>(memory, &x, &y);
                             }
@@ -2476,7 +2531,7 @@ fn pairing_input_computations<H: CurveHooks>(
     Ok(())
 }
 
-// Utility function for batch-inverting `Fr` elements in memory.
+// Utility function for batch-inverting a chunk of `Fr` elements in memory.
 fn batch_invert_in_memory(memory: &mut [u8], start: u32, end: u32) -> Result<(), ()> {
     // TODO: Error handling...
     if end <= start {
