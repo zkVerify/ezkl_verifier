@@ -18,7 +18,6 @@ use ark_ff::{AdditiveGroup, BigInteger, Field, One, PrimeField, fields::batch_in
 use ark_models_ext::bn::{G1Prepared, G2Prepared};
 use core::ops::BitAnd;
 use sha3::{Digest, Keccak256};
-use std::os::linux::raw;
 
 use crate::{
     constants::{BYTE_FLAG_BITMASK, DELTA, PTR_BITMASK},
@@ -329,181 +328,9 @@ fn verify_proof_inner<H: CurveHooks>(
 
     compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
 
-    // Compute quotient evaluation
-    {
-        let mut quotient_eval_numer = Fr::ONE;
-        let y = mload(memory, theta_mptr as u32 + 0x60)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to read evaluation point y from memory. Cause: {e}"),
-            })?
-            .into_fr();
+    perform_quotient_evaluation(memory, raw_proof, vka_end, theta_mptr)?;
 
-        quotient_eval_numer =
-            perform_gate_computations(memory, raw_proof, vka_end, quotient_eval_numer, y)?;
-
-        quotient_eval_numer = perform_permutation_computations(
-            memory,
-            raw_proof,
-            vka_end,
-            theta_mptr,
-            quotient_eval_numer,
-            y,
-        )?;
-
-        {
-            // lookup computations
-            // mstore(vka_end, mload(add(theta_mptr, 0x1C0)))
-            let value =
-                &mload(&memory, theta_mptr as u32 + 0x1c0).map_err(|e| VerifyError::KeyError {
-                    message: format!("Failed to read l_last from memory. Cause: {e}"),
-                })?;
-            memory[vka_end..vka_end + 0x20].copy_from_slice(value); // l_last
-            // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x200)))
-            let value =
-                &mload(memory, theta_mptr as u32 + 0x200).map_err(|e| VerifyError::KeyError {
-                    message: format!("Failed to read l_0 from memory. Cause: {e}"),
-                })?;
-            memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(value); // l_0
-            // mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x1E0)))
-            let value = &mload(memory, 0x1e0).map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to read l_blind from memory. Cause: {e}"),
-            })?;
-            memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(value); // l_blind
-            // mstore(add(0x60, vka_end), mload(theta_mptr))
-            let value = &mload(memory, theta_mptr as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to read theta from memory. Cause: {e}"),
-            })?;
-            memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(value); // theta
-            // mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x20)))
-            let value =
-                &mload(memory, theta_mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError {
-                    message: format!("Failed to read beta from memory. Cause: {e}"),
-                })?;
-            memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(value); // beta
-            let (mut evals_ptr, meta_data) =
-                soa_layout_metadata(memory, 0x380 + VKA_OFFSET + MEMORY_OFFSET).map_err(|e| {
-                    VerifyError::KeyError {
-                        message: format!("{e}"),
-                    }
-                })?;
-
-            // lookup meta data contains 32 byte flags for indicating if we need to do a lookup table lines
-            // expression evaluation or we can use the previous one cached in the table var.
-            if meta_data != 0 {
-                let mut table = Fr::ZERO;
-                let end_ptr = u32::try_from(meta_data as u64 & PTR_BITMASK)
-                    .expect("Conversion should succeed because this is just 2 bytes long");
-                let mv = (meta_data >> 16) as u64 & BYTE_FLAG_BITMASK;
-                match mv {
-                    0x0 => {
-                        while evals_ptr < end_ptr as usize {
-                            (evals_ptr, table, quotient_eval_numer) = mv_lookup_evals(
-                                memory,
-                                raw_proof,
-                                table,
-                                evals_ptr,
-                                quotient_eval_numer,
-                                y,
-                            )
-                            .unwrap();
-                        }
-                    }
-                    0x1 => {
-                        // mstore(add(0xA0, vka_end), mload(add(theta_mptr, 0x40)))
-                        let bytes = mload(memory, theta_mptr as u32 + 0x40).unwrap();
-                        memory[vka_end..vka_end + 0xa0].copy_from_slice(&bytes); // gamma
-                        while evals_ptr < end_ptr as usize {
-                            (evals_ptr, table, quotient_eval_numer) = lookup_evals(
-                                memory,
-                                raw_proof,
-                                table,
-                                evals_ptr,
-                                quotient_eval_numer,
-                                y,
-                            )
-                            .unwrap();
-                        }
-                    }
-                    _ => {
-                        return Err(VerifyError::KeyError {
-                            message: format!("Unsupported value for mv. Got: {mv}"),
-                        });
-                    }
-                }
-            }
-        }
-
-        // mstore(add(theta_mptr, 0x240), mulmod(quotient_eval_numer, mload(add(theta_mptr, 0x1a0)), R))
-        let idx = theta_mptr + 0x240;
-        let val = quotient_eval_numer * mload(memory, theta_mptr as u32 + 0x1a0).map_err(|e| VerifyError::KeyError { message: format!("Failed to read scalar from memory at the end of permutation computations phase. Cause: {e}" )})?.into_fr();
-        memory[idx..(idx + 0x20)].copy_from_slice(&val.into_be_bytes32());
-    }
-
-    // Compute quotient commitment
-    {
-        let first_quotient_x_cptr = 0x0320 + VKA_OFFSET + MEMORY_OFFSET;
-        let last_quotient_x_cptr = 0x0300 + VKA_OFFSET + MEMORY_OFFSET;
-        let bytes = load_from_proof(
-            raw_proof,
-            mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to load pointer at last_quotient_x_cptr from memory. Cause: {e}"
-                ),
-            })?,
-        )
-        .map_err(|e| VerifyError::InvalidProofError {
-            message: format!("Unable to load last_quotient_x from proof. Cause: {e}"),
-        })?;
-        // mstore(vka_end, calldataload(mload(0x03a0)))
-        memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
-
-        // mstore(add(0x20, vka_end), calldataload(add(mload(0x03a0), 0x20)))
-        let bytes = load_from_proof(
-            raw_proof,
-            mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to load pointer at last_quotient_x_cptr from memory. Cause: {e}"
-                ),
-            })? + 0x20,
-        )
-        .map_err(|e| VerifyError::InvalidProofError {
-            message: format!("Unable to load last_quotient_y from proof. Cause: {e}"),
-        })?;
-        memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
-
-        let x_n = mload(memory, theta_mptr as u32 + 0x180)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to read x_n from memory. Cause: {e}"),
-            })?
-            .into_fr();
-
-        let mut cptr =
-            mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to initialize cptr during quotient commitment computation phase. Cause: {e}"),
-            })? - 0x40;
-        let cptr_end =  mload_u32(memory, first_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to initialize cptr_end during quotient commitment computation phase. Cause: {e}"),
-            })? - 0x40;
-        while cptr_end < cptr {
-            ec_mul_acc::<H>(memory, &x_n).map_err(|_| VerifyError::OtherError {
-                message: "".to_string(),
-            })?; // TODO: Replace with better Error variant
-
-            let x = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read x coordinate from proof during the quotient commitment computation phase. Cause: {e}") })?);
-            let y = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr + 0x20).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read y coordinate from proof during the quotient commitment computation phase. Cause: {e}") })?);
-            ec_add_acc::<H>(memory, &x, &y).map_err(|_| VerifyError::OtherError {
-                message: "".to_string(),
-            })?; // TODO: Replace with better Error variant
-            cptr -= 0x40;
-        }
-        // mstore(add(theta_mptr, 0x260), mload(vka_end))
-        let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end during the quotient commitment computation phase. Cause: {e}") })?;
-        memory[(theta_mptr + 0x260)..(theta_mptr + 0x260 + 0x20)].copy_from_slice(&bytes);
-
-        // mstore(add(theta_mptr, 0x280), mload(add(0x20, vka_end)))
-        let bytes = mload(&memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end + 0x20 during the quotient commitment computation phase. Cause: {e}") })?;
-        memory[(theta_mptr + 0x280)..(theta_mptr + 0x280 + 0x20)].copy_from_slice(&bytes);
-    }
+    compute_quotient_commitment::<H>(memory, raw_proof, vka_end, theta_mptr)?; // TODO: REMOVE H IF IT IS UNECESSARY...
 
     // Compute pairing lhs and rhs
     {
@@ -1104,12 +931,13 @@ fn verify_proof_inner<H: CurveHooks>(
 
             // mstore(add(0xa0, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
             let idx = 0xa0 + vka_end;
-            let bytes = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32)
-                .map_err(|e| VerifyError::InvalidProofError {
+            let bytes = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(
+                |e| VerifyError::InvalidProofError {
                     message: format!(
                         "Unable to load from proof during pairing_input_computations. Cause: {e}"
                     ),
-                })?;
+                },
+            )?;
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
             ec_points_cptr_packed >>= 16;
@@ -3180,6 +3008,207 @@ fn perform_permutation_computations(
     }
 
     Ok(quotient_eval_numer)
+}
+
+// Lookup computations. Returns updated quotient_eval_numer.
+fn perform_lookup_computations(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    vka_end: usize,
+    theta_mptr: usize,
+    mut quotient_eval_numer: Fr,
+    y: Fr,
+) -> Result<Fr, VerifyError> {
+    // mstore(vka_end, mload(add(theta_mptr, 0x1C0)))
+    let value = &mload(&memory, theta_mptr as u32 + 0x1c0).map_err(|e| VerifyError::KeyError {
+        message: format!("Failed to read l_last from memory. Cause: {e}"),
+    })?;
+    memory[vka_end..vka_end + 0x20].copy_from_slice(value); // l_last
+    // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x200)))
+    let value = &mload(memory, theta_mptr as u32 + 0x200).map_err(|e| VerifyError::KeyError {
+        message: format!("Failed to read l_0 from memory. Cause: {e}"),
+    })?;
+    memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(value); // l_0
+    // mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x1E0)))
+    let value = &mload(memory, 0x1e0).map_err(|e| VerifyError::KeyError {
+        message: format!("Failed to read l_blind from memory. Cause: {e}"),
+    })?;
+    memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(value); // l_blind
+    // mstore(add(0x60, vka_end), mload(theta_mptr))
+    let value = &mload(memory, theta_mptr as u32).map_err(|e| VerifyError::KeyError {
+        message: format!("Failed to read theta from memory. Cause: {e}"),
+    })?;
+    memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(value); // theta
+    // mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x20)))
+    let value = &mload(memory, theta_mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError {
+        message: format!("Failed to read beta from memory. Cause: {e}"),
+    })?;
+    memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(value); // beta
+    let (mut evals_ptr, meta_data) =
+        soa_layout_metadata(memory, 0x380 + VKA_OFFSET + MEMORY_OFFSET).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!("{e}"),
+            }
+        })?;
+
+    // lookup meta data contains 32 byte flags for indicating if we need to do a lookup table lines
+    // expression evaluation or we can use the previous one cached in the table var.
+    if meta_data != 0 {
+        let mut table = Fr::ZERO;
+        let end_ptr = u32::try_from(meta_data as u64 & PTR_BITMASK)
+            .expect("Conversion should succeed because this is just 2 bytes long");
+        let mv = (meta_data >> 16) as u64 & BYTE_FLAG_BITMASK;
+        match mv {
+            0x0 => {
+                while evals_ptr < end_ptr as usize {
+                    (evals_ptr, table, quotient_eval_numer) = mv_lookup_evals(
+                        memory,
+                        raw_proof,
+                        table,
+                        evals_ptr,
+                        quotient_eval_numer,
+                        y,
+                    )
+                    .unwrap();
+                }
+            }
+            0x1 => {
+                // mstore(add(0xA0, vka_end), mload(add(theta_mptr, 0x40)))
+                let bytes = mload(memory, theta_mptr as u32 + 0x40).unwrap();
+                memory[vka_end..vka_end + 0xa0].copy_from_slice(&bytes); // gamma
+                while evals_ptr < end_ptr as usize {
+                    (evals_ptr, table, quotient_eval_numer) =
+                        lookup_evals(memory, raw_proof, table, evals_ptr, quotient_eval_numer, y)
+                            .unwrap();
+                }
+            }
+            _ => {
+                return Err(VerifyError::KeyError {
+                    message: format!("Unsupported value for mv. Got: {mv}"),
+                });
+            }
+        }
+    }
+
+    Ok(quotient_eval_numer)
+}
+
+// Compute quotient evaluation
+fn perform_quotient_evaluation(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    vka_end: usize,
+    theta_mptr: usize,
+) -> Result<(), VerifyError> {
+    let mut quotient_eval_numer = Fr::ONE;
+    let y = mload(memory, theta_mptr as u32 + 0x60)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Failed to read evaluation point y from memory. Cause: {e}"),
+        })?
+        .into_fr();
+
+    quotient_eval_numer =
+        perform_gate_computations(memory, raw_proof, vka_end, quotient_eval_numer, y)?;
+
+    quotient_eval_numer = perform_permutation_computations(
+        memory,
+        raw_proof,
+        vka_end,
+        theta_mptr,
+        quotient_eval_numer,
+        y,
+    )?;
+
+    quotient_eval_numer = perform_lookup_computations(
+        memory,
+        raw_proof,
+        vka_end,
+        theta_mptr,
+        quotient_eval_numer,
+        y,
+    )?;
+
+    // mstore(add(theta_mptr, 0x240), mulmod(quotient_eval_numer, mload(add(theta_mptr, 0x1a0)), R))
+    let idx = theta_mptr + 0x240;
+    let val = quotient_eval_numer * mload(memory, theta_mptr as u32 + 0x1a0).map_err(|e| VerifyError::KeyError { message: format!("Failed to read scalar from memory at the end of permutation computations phase. Cause: {e}" )})?.into_fr();
+    memory[idx..(idx + 0x20)].copy_from_slice(&val.into_be_bytes32());
+
+    Ok(())
+}
+
+// Compute quotient commitment
+fn compute_quotient_commitment<H: CurveHooks>(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    vka_end: usize,
+    theta_mptr: usize,
+) -> Result<(), VerifyError> {
+    let first_quotient_x_cptr = 0x0320 + VKA_OFFSET + MEMORY_OFFSET;
+    let last_quotient_x_cptr = 0x0300 + VKA_OFFSET + MEMORY_OFFSET;
+    let bytes = load_from_proof(
+        raw_proof,
+        mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "Unable to load pointer at last_quotient_x_cptr from memory. Cause: {e}"
+            ),
+        })?,
+    )
+    .map_err(|e| VerifyError::InvalidProofError {
+        message: format!("Unable to load last_quotient_x from proof. Cause: {e}"),
+    })?;
+    // mstore(vka_end, calldataload(mload(0x03a0)))
+    memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
+
+    // mstore(add(0x20, vka_end), calldataload(add(mload(0x03a0), 0x20)))
+    let bytes = load_from_proof(
+        raw_proof,
+        mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "Unable to load pointer at last_quotient_x_cptr from memory. Cause: {e}"
+            ),
+        })? + 0x20,
+    )
+    .map_err(|e| VerifyError::InvalidProofError {
+        message: format!("Unable to load last_quotient_y from proof. Cause: {e}"),
+    })?;
+    memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
+
+    let x_n = mload(memory, theta_mptr as u32 + 0x180)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Failed to read x_n from memory. Cause: {e}"),
+        })?
+        .into_fr();
+
+    let mut cptr =
+        mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "Failed to initialize cptr during quotient commitment computation phase. Cause: {e}"
+            ),
+        })? - 0x40;
+    let cptr_end =  mload_u32(memory, first_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to initialize cptr_end during quotient commitment computation phase. Cause: {e}"),
+            })? - 0x40;
+    while cptr_end < cptr {
+        ec_mul_acc::<H>(memory, &x_n).map_err(|_| VerifyError::OtherError {
+            message: "".to_string(),
+        })?; // TODO: Replace with better Error variant
+
+        let x = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read x coordinate from proof during the quotient commitment computation phase. Cause: {e}") })?);
+        let y = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr + 0x20).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read y coordinate from proof during the quotient commitment computation phase. Cause: {e}") })?);
+        ec_add_acc::<H>(memory, &x, &y).map_err(|_| VerifyError::OtherError {
+            message: "".to_string(),
+        })?; // TODO: Replace with better Error variant
+        cptr -= 0x40;
+    }
+    // mstore(add(theta_mptr, 0x260), mload(vka_end))
+    let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end during the quotient commitment computation phase. Cause: {e}") })?;
+    memory[(theta_mptr + 0x260)..(theta_mptr + 0x260 + 0x20)].copy_from_slice(&bytes);
+
+    // mstore(add(theta_mptr, 0x280), mload(add(0x20, vka_end)))
+    let bytes = mload(&memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end + 0x20 during the quotient commitment computation phase. Cause: {e}") })?;
+    memory[(theta_mptr + 0x280)..(theta_mptr + 0x280 + 0x20)].copy_from_slice(&bytes);
+
+    Ok(())
 }
 
 #[cfg(test)]
