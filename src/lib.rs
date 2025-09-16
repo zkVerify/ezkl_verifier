@@ -882,7 +882,7 @@ fn verify_proof_inner<H: CurveHooks>(
             // Store interm point
             // mstore(add(and(point_computations, PTR_BITMASK), vka_end), x)
             let idx = vka_end + lsb16(&point_computations);
-            memory[idx..idx + 0x20].copy_from_slice(&x.into_be_bytes32()); // Is this a point or a scalar?
+            memory[idx..idx + 0x20].copy_from_slice(&x.into_be_bytes32());
             x_pow_of_omega = x * omega_inv;
             point_computations >>= 16;
             (x_pow_of_omega, pcs_ptr) = point_rots(
@@ -927,7 +927,7 @@ fn verify_proof_inner<H: CurveHooks>(
                 let idx = vka_end + mptr;
                 let val = mu
                     - mload(memory, (point_mptr + vka_end) as u32)
-                        .unwrap()
+                        .map_err(|e| VerifyError::KeyError { message: format!("Unable to load scalar from memory during vanishing_computations. Cause: {e}") })?
                         .into_fr();
                 // mstore(add(vka_end, mptr), val);
                 memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
@@ -940,20 +940,28 @@ fn verify_proof_inner<H: CurveHooks>(
             let num_words = lsb8(&vanishing_computations);
             vanishing_computations >>= 8;
             let mut s = mload(memory, (vka_end + lsb16(&vanishing_computations)) as u32)
-                .unwrap()
+                .map_err(|e| VerifyError::KeyError { message: format!("Unable to initialize s with scalar from memory during vanishing_computations. Cause: {e}") })?
                 .into_fr();
             vanishing_computations >>= 16;
-            // for { let i } lt(i, num_words) { i := add(i, 1) } {
             for _ in 0..num_words {
-                // for {  } vanishing_computations {  } {
                 while !vanishing_computations.is_zero() {
                     s = s * mload(memory, (vka_end + lsb16(&vanishing_computations)) as u32)
-                        .unwrap()
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!(
+                                "Unable to update s during vanishing_computations. Cause: {e}"
+                            ),
+                        })?
                         .into_fr();
                     vanishing_computations >>= 16;
                 }
                 pcs_ptr += 0x20;
-                vanishing_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+                vanishing_computations = mload(memory, pcs_ptr as u32)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "Unable to load vanishing_computations from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_u256();
             }
             let mut diff_ptr = vka_end + lsb16(&vanishing_computations);
             // mstore(diff_ptr, s)
@@ -980,7 +988,11 @@ fn verify_proof_inner<H: CurveHooks>(
                 while !vanishing_computations.is_zero() {
                     diff = diff
                         * mload(memory, (lsb16(&vanishing_computations) + vka_end) as u32)
-                            .unwrap()
+                            .map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "Unable to read scalar from memory in order to update diff. Cause: {e}"
+                                ),
+                            })?
                             .into_fr();
                     vanishing_computations >>= 16;
                 }
@@ -1040,7 +1052,7 @@ fn verify_proof_inner<H: CurveHooks>(
         {
             let mut norm_coeff_data = mload(memory, pcs_ptr as u32)
                 .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load norm_coeff_data from memory. Cause: {e}"),
+                    message: format!("Unable to load norm_coeff_data from memory during normalized_coeff_computations. Cause: {e}"),
                 })?
                 .into_u256();
 
@@ -1054,7 +1066,7 @@ fn verify_proof_inner<H: CurveHooks>(
 
             let diff_0_inv = mload(memory, vka_end as u32)
                 .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load diff_0_inv from memory. Cause: {e}"),
+                    message: format!("Unable to load diff_0_inv from memory during normalized_coeff_computations. Cause: {e}"),
                 })?
                 .into_fr();
             let mptr0 = lsb16(&norm_coeff_data) + vka_end;
@@ -1066,7 +1078,9 @@ fn verify_proof_inner<H: CurveHooks>(
             let mptr_end = mptr0 + lsb16(&norm_coeff_data);
             for mptr in ((mptr0 + 0x20)..mptr_end).step_by(0x20) {
                 // mstore(mptr, mulmod(mload(mptr), diff_0_inv, R))
-                let val = mload(memory, mptr as u32).unwrap().into_fr() * diff_0_inv;
+                let val = mload(memory, mptr as u32).map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load scalar from memory during normalized_coeff_computations. Cause: {e}"),
+                })?.into_fr() * diff_0_inv;
                 memory[mptr..mptr + 0x20].copy_from_slice(&val.into_be_bytes32());
             }
             pcs_ptr += 0x20;
@@ -1162,13 +1176,21 @@ fn verify_proof_inner<H: CurveHooks>(
                 while !coeff_sums_data.is_zero() {
                     let mut sum = mload(memory, coeff_ptr as u32)
                         .map_err(|e| VerifyError::KeyError {
-                            message: format!("Unable to load sum from memory. Cause: {e}"),
+                            message: format!(
+                                "Unable to load initial value for sum from memory. Cause: {e}"
+                            ),
                         })?
                         .into_fr();
                     let len = lsb8(&coeff_sums_data);
                     coeff_sums_data >>= 8;
                     for j in (0x20..len).step_by(0x20) {
-                        sum += mload(memory, (coeff_ptr + j) as u32).unwrap().into_fr(); // TODO: DOUBLE-CHECK: (coeff_ptr + j) as u32 fits into a `u32`
+                        sum += mload(memory, (coeff_ptr + j) as u32)
+                            .map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "Unable to update sum during coeff_sums_computation. Cause: {e}"
+                                ),
+                            })?
+                            .into_fr(); // TODO: DOUBLE-CHECK: (coeff_ptr + j) as u32 fits into a `u32`
                     }
                     coeff_ptr += len;
                     let idx = lsb16(&coeff_sums_data) + vka_end;
@@ -1200,7 +1222,11 @@ fn verify_proof_inner<H: CurveHooks>(
             let mut sum_mptr = lsb16(&r_eval_data) + vka_end;
             while mptr < mptr_end {
                 // mstore(mptr, mload(sum_mptr))
-                let bytes = mload(memory, sum_mptr as u32).unwrap();
+                let bytes = mload(memory, sum_mptr as u32).map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load scalar from memory during r_eval_computation. Cause: {e}"
+                    ),
+                })?;
                 memory[mptr..mptr + 0x20].copy_from_slice(&bytes);
 
                 mptr += 0x20;
@@ -1211,8 +1237,16 @@ fn verify_proof_inner<H: CurveHooks>(
             batch_invert_in_memory(memory, vka_end as u32, mptr_end as u32);
 
             let r_eval_ptr = lsb16(&r_eval_data) + vka_end;
-            let mut r_eval = mload(memory, mptr_end as u32 - 0x20).unwrap().into_fr()
-                * mload(memory, r_eval_ptr as u32).unwrap().into_fr();
+            let mut r_eval = mload(memory, mptr_end as u32 - 0x20)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to initialize r_eval. Cause: {e}"),
+                })?
+                .into_fr()
+                * mload(memory, r_eval_ptr as u32)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!("Unable to initialize r_eval. Cause: {e}"),
+                    })?
+                    .into_fr();
             r_eval_data >>= 16;
 
             let mut sum_inv_mptr = mptr_end - 0x40;
@@ -1251,6 +1285,7 @@ fn verify_proof_inner<H: CurveHooks>(
 
             pcs_ptr += 0x20;
         }
+
         // pairing_input_computations
         let mut nu = mload(memory, theta_mptr as u32 + 0xC0)
             .map_err(|e| VerifyError::KeyError {
@@ -1286,7 +1321,9 @@ fn verify_proof_inner<H: CurveHooks>(
                     pairing_input_meta_data >>= 8;
                     if first {
                         first = false;
-                        let data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+                        let data = mload(memory, pcs_ptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load data from memory during pairing_input_computations. Cause: {e}"),
+            })?.into_u256();
                         pairing_input_computations_first::<H>(
                             memory,
                             raw_proof,
@@ -1298,7 +1335,9 @@ fn verify_proof_inner<H: CurveHooks>(
                         pcs_ptr += len;
                         continue;
                     }
-                    let data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+                    let data = mload(memory, pcs_ptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load data from memory during pairing_input_computations. Cause: {e}"),
+            })?.into_u256();
                     pairing_input_computations::<H>(
                         memory,
                         raw_proof,
@@ -1308,18 +1347,26 @@ fn verify_proof_inner<H: CurveHooks>(
                         theta_mptr as u32,
                     );
                     pcs_ptr += len;
-                    let s = mload(memory, set_coeff as u32).unwrap().into_fr();
+                    let s = mload(memory, set_coeff as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to initilize s with scalar from memory during pairing_input_computations. Cause: {e}"),
+            })?.into_fr();
                     ec_mul_tmp::<H>(memory, &(nu * s));
                     set_coeff += 0x20;
                     let x =
-                        Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).unwrap());
+                        Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load x from memory during pairing_input_computations. Cause: {e}"),
+            })?);
                     let y =
-                        Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).unwrap());
+                        Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load y from memory during pairing_input_computations. Cause: {e}"),
+            })?);
                     ec_add_acc::<H>(memory, &x, &y);
                     // execute this if statement if not the last set
                     if true || i < end_ptr_packed_lens - 0x20 {
                         // if or(0x1, lt(i, sub(end_ptr_packed_lens, 0x20))) {
-                        nu *= mload(memory, theta_mptr as u32 + 0xc0).unwrap().into_fr();
+                        nu *= mload(memory, theta_mptr as u32 + 0xc0).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to update nu using scalar from memory during pairing_input_computations. Cause: {e}"),
+            })?.into_fr();
                     }
                 }
                 pairing_input_meta_data = mload(memory, i as u32 + 0x20)
@@ -2921,17 +2968,31 @@ fn pairing_input_computations<H: CurveHooks>(
 }
 
 // Utility function for batch-inverting a chunk of `Fr` elements in memory.
-fn batch_invert_in_memory(memory: &mut [u8], start: u32, end: u32) -> Result<(), ()> {
+fn batch_invert_in_memory(memory: &mut [u8], start: u32, end: u32) -> Result<(), String> {
     // TODO: Error handling...
     if end <= start {
-        return Err(());
+        return Err(format!(
+            "Unable to batch-invert in-memory. start index (0x{:x?}) >= end index (0x{:x?})",
+            start, end
+        )
+        .to_string());
     } else if (end - start) & 31 != 0 {
-        return Err(());
+        return Err(
+            "Unable to batch-invert in-memory. Slice length is not a positive multiple of 32."
+                .to_string(),
+        );
     }
 
     let mut inverses = (start..end)
         .step_by(0x20)
-        .map(|p| mload(memory, p as u32).unwrap().into_fr())
+        .map(|p| {
+            mload(memory, p as u32)
+                .unwrap()
+                // .map_err(|e| {
+                //     format!("batch_invert_in_memory could not parse scalar from memory. Cause: {e}")
+                // })?
+                .into_fr()
+        })
         .collect::<Vec<_>>();
     batch_inversion(&mut inverses);
 
