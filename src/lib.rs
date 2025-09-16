@@ -329,503 +329,11 @@ fn verify_proof_inner<H: CurveHooks>(
     compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
     perform_quotient_evaluation(memory, raw_proof, vka_end, theta_mptr)?;
     compute_quotient_commitment::<H>(memory, raw_proof, vka_end, theta_mptr)?; // TODO: REMOVE H IF IT IS UNECESSARY...
-
-    // Compute pairing lhs and rhs
-    {
-        let mut pcs_ptr = mload_u32(memory, 0x03a0 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to read pcs_ptr from memory. Cause: {e}"),
-            })? as usize;
-
-        pcs_ptr = perform_point_computations(memory, vka_end, theta_mptr, pcs_ptr)?;
-        pcs_ptr = perform_vanishing_computations(memory, vka_end, theta_mptr, pcs_ptr)?;
-        pcs_ptr = perform_coeff_computations(memory, pcs_ptr)?;
-        pcs_ptr = perform_normalized_coeff_computations(memory, vka_end, pcs_ptr)?;
-
-        let mut coeff_ptr = vka_end + 0x20;
-
-        pcs_ptr = perform_r_evals_computations(
-            memory, raw_proof, vka_end, theta_mptr, pcs_ptr, coeff_ptr,
-        )?;
-        pcs_ptr = perform_coeff_sums_computation(memory, vka_end, pcs_ptr)?;
-        pcs_ptr = perform_r_eval_computation(memory, vka_end, theta_mptr, pcs_ptr)?;
-
-        // pairing_input_computations
-        let mut nu = mload(memory, theta_mptr as u32 + 0xC0)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load nu from memory. Cause: {e}"),
-            })?
-            .into_fr();
-
-        {
-            let mut pairing_input_meta_data = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load pairing_input_meta_data from memory. Cause: {e}"
-                    ),
-                })?
-                .into_u256();
-
-            let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&pairing_input_meta_data);
-            pairing_input_meta_data >>= 8;
-            let mut set_coeff = lsb16(&pairing_input_meta_data) + vka_end;
-            pairing_input_meta_data >>= 16;
-
-            let mut ec_points_cptr_packed =
-                pairing_input_meta_data.bitand(U256::new([0xffffffffffffffffu64, 0xffffu64, 0, 0]));
-
-            pairing_input_meta_data >>= 80;
-            let mut i = pcs_ptr;
-            pcs_ptr = end_ptr_packed_lens;
-            let mut first = true;
-
-            while i < end_ptr_packed_lens {
-                while !pairing_input_meta_data.is_zero() {
-                    let len = lsb8(&pairing_input_meta_data);
-                    pairing_input_meta_data >>= 8;
-                    if first {
-                        first = false;
-                        let data = mload(memory, pcs_ptr as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load data from memory during pairing_input_computations. Cause: {e}"),
-            })?.into_u256();
-                        pairing_input_computations_first::<H>(
-                            memory,
-                            raw_proof,
-                            len as u32,
-                            pcs_ptr as u32,
-                            data,
-                            theta_mptr as u32,
-                        );
-                        pcs_ptr += len;
-                        continue;
-                    }
-                    let data = mload(memory, pcs_ptr as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load data from memory during pairing_input_computations. Cause: {e}"),
-            })?.into_u256();
-                    pairing_input_computations::<H>(
-                        memory,
-                        raw_proof,
-                        len as u32,
-                        pcs_ptr as u32,
-                        data,
-                        theta_mptr as u32,
-                    );
-                    pcs_ptr += len;
-                    let s = mload(memory, set_coeff as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to initilize s with scalar from memory during pairing_input_computations. Cause: {e}"),
-            })?.into_fr();
-                    ec_mul_tmp::<H>(memory, &(nu * s));
-                    set_coeff += 0x20;
-                    let x =
-                        Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load x from memory during pairing_input_computations. Cause: {e}"),
-            })?);
-                    let y =
-                        Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load y from memory during pairing_input_computations. Cause: {e}"),
-            })?);
-                    ec_add_acc::<H>(memory, &x, &y);
-                    // execute this if statement if not the last set
-                    if true || i < end_ptr_packed_lens - 0x20 {
-                        // if or(0x1, lt(i, sub(end_ptr_packed_lens, 0x20))) {
-                        nu *= mload(memory, theta_mptr as u32 + 0xc0).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to update nu using scalar from memory during pairing_input_computations. Cause: {e}"),
-            })?.into_fr();
-                    }
-                }
-                pairing_input_meta_data = mload(memory, i as u32 + 0x20)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!(
-                            "Unable to load pairing_input_meta_data from memory. Cause: {e}"
-                        ),
-                    })?
-                    .into_u256();
-                i += 0x20;
-            }
-            // Load G1's SRS generator from the VKA into memory
-
-            // mstore(add(0x80, vka_end), mload(0x0260))
-            let idx1 = 0x01c0 + VKA_OFFSET + MEMORY_OFFSET; // g1_x index
-            let idx2 = vka_end + 0x80;
-            let g1_x_bytes = mload(&memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load g1_x_bytes from memory. Cause: {e}"),
-            })?;
-            memory[idx2..idx2 + 0x20].copy_from_slice(&g1_x_bytes);
-
-            // mstore(add(0xa0, vka_end), mload(0x0280))
-            let idx1 = 0x01e0 + VKA_OFFSET + MEMORY_OFFSET; // g1_y index
-            let idx2 = vka_end + 0xa0;
-            let g1_y_bytes = mload(&memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load g1_y_bytes from memory. Cause: {e}"),
-            })?;
-            memory[idx2..idx2 + 0x20].copy_from_slice(&g1_y_bytes);
-
-            let s = -mload(memory, theta_mptr as u32 + 0x2a0)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load scalar from memory during pairing_input_computations. Cause: {e}"),
-                })?
-                .into_fr();
-            ec_mul_tmp::<H>(memory, &s);
-            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(
-                |e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load x from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?);
-            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(
-                |e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load y from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?);
-            ec_add_acc::<H>(memory, &x, &y);
-
-            // mstore(add(0x80, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
-            let idx = 0x80 + vka_end;
-            let bytes = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(
-                |e| VerifyError::InvalidProofError {
-                    message: format!(
-                        "Unable to load from proof during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?;
-            memory[idx..idx + 0x20].copy_from_slice(&bytes);
-
-            ec_points_cptr_packed >>= 16;
-
-            // mstore(add(0xa0, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
-            let idx = 0xa0 + vka_end;
-            let bytes = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(
-                |e| VerifyError::InvalidProofError {
-                    message: format!(
-                        "Unable to load from proof during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?;
-            memory[idx..idx + 0x20].copy_from_slice(&bytes);
-
-            ec_points_cptr_packed >>= 16;
-
-            let s = -mload(
-                memory,
-                lsb16(&ec_points_cptr_packed) as u32 + vka_end as u32,
-            )
-            .map_err(
-                |e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?
-            .into_fr();
-            ec_mul_tmp::<H>(memory, &s);
-            ec_points_cptr_packed >>= 16;
-
-            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(
-                |e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load x from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?);
-            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(
-                |e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load y from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?);
-            ec_add_acc::<H>(memory, &x, &y);
-
-            let w_prime_x = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32)
-                .map_err(|e| VerifyError::InvalidProofError {
-                    message: format!("Unable to load w_prime_x from proof. Cause: {e}"),
-                })?;
-            ec_points_cptr_packed >>= 16;
-            let w_prime_y = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32)
-                .map_err(|e| VerifyError::InvalidProofError {
-                    message: format!("Unable to load w_prime_y from proof. Cause: {e}"),
-                })?;
-            // mstore(add(0x80, vka_end), w_prime_x)
-            let idx = 0x80 + vka_end;
-            memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
-
-            // mstore(add(0xa0, vka_end), w_prime_y)
-            let idx = 0xa0 + vka_end;
-            memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
-
-            let s = mload(memory, theta_mptr as u32 + 0xe0)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                })?
-                .into_fr();
-            ec_mul_tmp::<H>(memory, &s);
-            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(
-                |e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load x from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?);
-            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(
-                |e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load y from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?);
-            ec_add_acc::<H>(memory, &x, &y);
-
-            // mstore(add(theta_mptr, 0x2C0), mload(vka_end))
-            let idx = theta_mptr + 0x2c0;
-            let bytes = mload(memory, vka_end as u32).map_err(
-                |e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?;
-            memory[idx..idx + 0x20].copy_from_slice(&bytes);
-
-            // mstore(add(theta_mptr, 0x2E0), mload(add(0x20, vka_end)))
-            let idx = theta_mptr + 0x2e0;
-            let bytes = mload(memory, 0x20 + vka_end as u32).map_err(
-                |e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
-                    ),
-                },
-            )?;
-            memory[idx..idx + 0x20].copy_from_slice(&bytes);
-
-            // mstore(add(theta_mptr, 0x300), w_prime_x)
-            let idx = theta_mptr + 0x300;
-            memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
-
-            // mstore(add(theta_mptr, 0x320), w_prime_y)
-            let idx = theta_mptr + 0x320;
-            memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
-        }
-    }
-
-    // Random linear combine with accumulator
-    if !mload(memory, 0x0140 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
-        .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read has_accumulator field from VKA. Cause: {e}"),
-        })?
-        .into_u256()
-        .is_zero()
-    {
-        //     mstore(add(0x00, vka_end), mload(add(theta_mptr, 0x100)))
-        let mut bytes =
-            mload(memory, theta_mptr as u32 + 0x100).map_err(|e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to read from memory during random linear combine. Cause: {e}"
-                ),
-            })?;
-        memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
-        //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x120)))
-        bytes = mload(memory, theta_mptr as u32 + 0x120).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
-        //     mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x140)))
-        bytes = mload(memory, theta_mptr as u32 + 0x140).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(&bytes);
-        //     mstore(add(0x60, vka_end), mload(add(theta_mptr, 0x160)))
-        bytes = mload(memory, theta_mptr as u32 + 0x160).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(&bytes);
-        //     mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x2c0)))
-        bytes = mload(memory, theta_mptr as u32 + 0x2c0).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(&bytes);
-        //     mstore(add(0xa0, vka_end), mload(add(theta_mptr, 0x2e0)))
-        bytes = mload(memory, theta_mptr as u32 + 0x2e0).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[(vka_end + 0xa0)..(vka_end + 0xc0)].copy_from_slice(&bytes);
-        //     mstore(add(0xc0, vka_end), mload(add(theta_mptr, 0x300)))
-        bytes = mload(memory, theta_mptr as u32 + 0x300).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[(vka_end + 0xc0)..(vka_end + 0xe0)].copy_from_slice(&bytes);
-        //     mstore(add(0xe0, vka_end), mload(add(theta_mptr, 0x320)))
-        bytes = mload(memory, theta_mptr as u32 + 0x320).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[(vka_end + 0xe0)..(vka_end + 0x100)].copy_from_slice(&bytes);
-
-        // let challenge := mod(keccak256(vka_end, add(0x100, vka_end)), R)
-        let challenge = {
-            let start = vka_end;
-            let end = vka_end + 0x100 + vka_end;
-            let hash: [u8; 32] = Keccak256::new()
-                .chain_update(&memory[start..end])
-                .finalize()
-                .into();
-            hash.into_fr()
-        };
-
-        // [pairing_lhs] += challenge * [acc_lhs]
-        ec_mul_acc::<H>(memory, &challenge);
-        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).map_err(
-            |e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to load x from memory during random linear combine phase. Cause: {e}"
-                ),
-            },
-        )?);
-        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).map_err(
-            |e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to load y from memory during random linear combine phase. Cause: {e}"
-                ),
-            },
-        )?);
-        ec_add_acc::<H>(memory, &x, &y);
-        // mstore(add(theta_mptr, 0x2c0), mload(vka_end))
-        let idx = theta_mptr + 0x2c0;
-        let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[idx..idx + 0x20].copy_from_slice(&bytes);
-
-        // mstore(add(theta_mptr, 0x2e0), mload(add(0x20, vka_end)))
-        let idx = theta_mptr + 0x2e0;
-        let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[idx..idx + 0x20].copy_from_slice(&bytes);
-
-        // [pairing_rhs] += challenge * [acc_rhs]
-        // mstore(vka_end, mload(add(theta_mptr, 0x140)))
-        let idx = vka_end;
-        let bytes =
-            mload(memory, theta_mptr as u32 + 0x140).map_err(|e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to read from memory during random linear combine. Cause: {e}"
-                ),
-            })?;
-        memory[idx..idx + 0x20].copy_from_slice(&bytes);
-
-        // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x160)))
-        let idx = vka_end + 0x20;
-        let bytes =
-            mload(memory, theta_mptr as u32 + 0x160).map_err(|e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to read from memory during random linear combine. Cause: {e}"
-                ),
-            })?;
-        memory[idx..idx + 0x20].copy_from_slice(&bytes);
-
-        ec_mul_acc::<H>(memory, &challenge);
-        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).map_err(
-            |e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to load x from memory during random linear combine phase. Cause: {e}"
-                ),
-            },
-        )?);
-        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).map_err(
-            |e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to load y from memory during random linear combine phase. Cause: {e}"
-                ),
-            },
-        )?);
-        ec_add_acc::<H>(memory, &x, &y);
-        // mstore(add(theta_mptr, 0x300), mload(vka_end))
-        let idx = theta_mptr + 0x300;
-        let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[idx..idx + 0x20].copy_from_slice(&bytes);
-
-        // mstore(add(theta_mptr, 0x320), mload(add(0x20, vka_end)))
-        let idx = theta_mptr + 0x320;
-        let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
-        })?;
-        memory[idx..idx + 0x20].copy_from_slice(&bytes);
-    }
+    compute_pairing_lhs_and_rhs::<H>(memory, raw_proof, vka_end, theta_mptr)?;
+    random_linear_combine_with_accumulator::<H>(memory, vka_end, theta_mptr)?;
 
     // Perform pairing
-
-    // LHS
-    let x =
-        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).map_err(|e| {
-            VerifyError::KeyError {
-                message: format!(
-                    "Unable to read LHS.x from memory during pairing computation phase. Cause: {e}"
-                ),
-            }
-        })?);
-    let y =
-        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).map_err(|e| {
-            VerifyError::KeyError {
-                message: format!(
-                    "Unable to read LHS.y from memory during pairing computation phase. Cause: {e}"
-                ),
-            }
-        })?);
-    let p_0 = G1::<H>::new(x, y);
-    // RHS
-    let x =
-        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).map_err(|e| {
-            VerifyError::KeyError {
-                message: format!(
-                    "Unable to read RHS.x from memory during pairing computation phase. Cause: {e}"
-                ),
-            }
-        })?);
-    let y =
-        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).map_err(|e| {
-            VerifyError::KeyError {
-                message: format!(
-                    "Unable to read RHS.y from memory during pairing computation phase. Cause: {e}"
-                ),
-            }
-        })?);
-    let p_1 = G1::new(x, y);
-
-    let g1_points = [G1Prepared::from(p_0), G1Prepared::from(p_1)];
-
-    let g2_x_1_index = 0x0200 + VKA_OFFSET + MEMORY_OFFSET;
-    let data = &memory[g2_x_1_index..g2_x_1_index + 4 * 0x20];
-    let h1 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
-    // TODO: VALIDATION REQUIRED!
-    // mstore(add(0x40, vka_end), mload( {{ vk_const_offsets["g2_x_1"]|hex() }}))
-    // mstore(add(0x60, vka_end), mload( {{ vk_const_offsets["g2_x_2"]|hex() }}))
-    // mstore(add(0x80, vka_end), mload( {{ vk_const_offsets["g2_y_1"]|hex() }}))
-    // mstore(add(0xa0, vka_end), mload( {{ vk_const_offsets["g2_y_2"]|hex() }}))
-
-    let neg_s_g2_x_1_index = 0x0280 + VKA_OFFSET + MEMORY_OFFSET;
-    let data = &memory[neg_s_g2_x_1_index..neg_s_g2_x_1_index + 4 * 0x20];
-    let h2 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
-    // TODO: VALIDATION REQUIRED!
-    // mstore(add(0x100, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_1"]|hex() }}))
-    // mstore(add(0x120, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_2"]|hex() }}))
-    // mstore(add(0x140, vka_end), mload( {{ vk_const_offsets["neg_s_g2_y_1"]|hex() }}))
-    // mstore(add(0x160, vka_end), mload( {{ vk_const_offsets["neg_s_g2_y_2"]|hex() }}))
-
-    let g2_points = [G2Prepared::from(h1), G2Prepared::from(h2)];
-
-    let product = Bn254::<H>::multi_pairing(g1_points, g2_points);
-
-    if product.0.is_one() {
-        Ok(())
-    } else {
-        Err(VerifyError::VerificationError)
-    }
+    pairing_check::<H>(memory, theta_mptr)
 }
 
 // Utility for checking if number of public inputs in the vk matches the actual length of the PI list.
@@ -3253,6 +2761,530 @@ fn perform_r_eval_computation(
     pcs_ptr += 0x20;
 
     Ok(pcs_ptr)
+}
+
+// pairing_input_computations
+fn perform_pairing_input_computations<H: CurveHooks>(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    vka_end: usize,
+    theta_mptr: usize,
+    mut pcs_ptr: usize,
+) -> Result<(), VerifyError> {
+    let mut nu = mload(memory, theta_mptr as u32 + 0xC0)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load nu from memory. Cause: {e}"),
+        })?
+        .into_fr();
+
+    let mut pairing_input_meta_data = mload(memory, pcs_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load pairing_input_meta_data from memory. Cause: {e}"),
+        })?
+        .into_u256();
+
+    let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&pairing_input_meta_data);
+    pairing_input_meta_data >>= 8;
+    let mut set_coeff = lsb16(&pairing_input_meta_data) + vka_end;
+    pairing_input_meta_data >>= 16;
+
+    let mut ec_points_cptr_packed =
+        pairing_input_meta_data.bitand(U256::new([0xffffffffffffffffu64, 0xffffu64, 0, 0]));
+
+    pairing_input_meta_data >>= 80;
+    let mut i = pcs_ptr;
+    pcs_ptr = end_ptr_packed_lens;
+    let mut first = true;
+
+    while i < end_ptr_packed_lens {
+        while !pairing_input_meta_data.is_zero() {
+            let len = lsb8(&pairing_input_meta_data);
+            pairing_input_meta_data >>= 8;
+            if first {
+                first = false;
+                let data = mload(memory, pcs_ptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load data from memory during pairing_input_computations. Cause: {e}"),
+            })?.into_u256();
+                pairing_input_computations_first::<H>(
+                    memory,
+                    raw_proof,
+                    len as u32,
+                    pcs_ptr as u32,
+                    data,
+                    theta_mptr as u32,
+                );
+                pcs_ptr += len;
+                continue;
+            }
+            let data = mload(memory, pcs_ptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load data from memory during pairing_input_computations. Cause: {e}"),
+            })?.into_u256();
+            pairing_input_computations::<H>(
+                memory,
+                raw_proof,
+                len as u32,
+                pcs_ptr as u32,
+                data,
+                theta_mptr as u32,
+            );
+            pcs_ptr += len;
+            let s = mload(memory, set_coeff as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to initilize s with scalar from memory during pairing_input_computations. Cause: {e}"),
+            })?.into_fr();
+            ec_mul_tmp::<H>(memory, &(nu * s));
+            set_coeff += 0x20;
+            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load x from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?);
+            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load y from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?);
+            ec_add_acc::<H>(memory, &x, &y);
+            // execute this if statement if not the last set
+            if true || i < end_ptr_packed_lens - 0x20 {
+                // if or(0x1, lt(i, sub(end_ptr_packed_lens, 0x20))) {
+                nu *= mload(memory, theta_mptr as u32 + 0xc0).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to update nu using scalar from memory during pairing_input_computations. Cause: {e}"),
+            })?.into_fr();
+            }
+        }
+        pairing_input_meta_data = mload(memory, i as u32 + 0x20)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load pairing_input_meta_data from memory. Cause: {e}"),
+            })?
+            .into_u256();
+        i += 0x20;
+    }
+    // Load G1's SRS generator from the VKA into memory
+
+    // mstore(add(0x80, vka_end), mload(0x0260))
+    let idx1 = 0x01c0 + VKA_OFFSET + MEMORY_OFFSET; // g1_x index
+    let idx2 = vka_end + 0x80;
+    let g1_x_bytes = mload(&memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
+        message: format!("Unable to load g1_x_bytes from memory. Cause: {e}"),
+    })?;
+    memory[idx2..idx2 + 0x20].copy_from_slice(&g1_x_bytes);
+
+    // mstore(add(0xa0, vka_end), mload(0x0280))
+    let idx1 = 0x01e0 + VKA_OFFSET + MEMORY_OFFSET; // g1_y index
+    let idx2 = vka_end + 0xa0;
+    let g1_y_bytes = mload(&memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
+        message: format!("Unable to load g1_y_bytes from memory. Cause: {e}"),
+    })?;
+    memory[idx2..idx2 + 0x20].copy_from_slice(&g1_y_bytes);
+
+    let s = -mload(memory, theta_mptr as u32 + 0x2a0)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+            ),
+        })?
+        .into_fr();
+    ec_mul_tmp::<H>(memory, &s);
+    let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!(
+                "Unable to load x from memory during pairing_input_computations. Cause: {e}"
+            ),
+        }
+    })?);
+    let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!(
+                "Unable to load y from memory during pairing_input_computations. Cause: {e}"
+            ),
+        }
+    })?);
+    ec_add_acc::<H>(memory, &x, &y);
+
+    // mstore(add(0x80, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
+    let idx = 0x80 + vka_end;
+    let bytes = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(|e| {
+        VerifyError::InvalidProofError {
+            message: format!(
+                "Unable to load from proof during pairing_input_computations. Cause: {e}"
+            ),
+        }
+    })?;
+    memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    ec_points_cptr_packed >>= 16;
+
+    // mstore(add(0xa0, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
+    let idx = 0xa0 + vka_end;
+    let bytes = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(|e| {
+        VerifyError::InvalidProofError {
+            message: format!(
+                "Unable to load from proof during pairing_input_computations. Cause: {e}"
+            ),
+        }
+    })?;
+    memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    ec_points_cptr_packed >>= 16;
+
+    let s = -mload(
+        memory,
+        lsb16(&ec_points_cptr_packed) as u32 + vka_end as u32,
+    )
+    .map_err(|e| VerifyError::KeyError {
+        message: format!(
+            "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+        ),
+    })?
+    .into_fr();
+    ec_mul_tmp::<H>(memory, &s);
+    ec_points_cptr_packed >>= 16;
+
+    let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!(
+                "Unable to load x from memory during pairing_input_computations. Cause: {e}"
+            ),
+        }
+    })?);
+    let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!(
+                "Unable to load y from memory during pairing_input_computations. Cause: {e}"
+            ),
+        }
+    })?);
+    ec_add_acc::<H>(memory, &x, &y);
+
+    let w_prime_x =
+        load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(|e| {
+            VerifyError::InvalidProofError {
+                message: format!("Unable to load w_prime_x from proof. Cause: {e}"),
+            }
+        })?;
+    ec_points_cptr_packed >>= 16;
+    let w_prime_y =
+        load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(|e| {
+            VerifyError::InvalidProofError {
+                message: format!("Unable to load w_prime_y from proof. Cause: {e}"),
+            }
+        })?;
+    // mstore(add(0x80, vka_end), w_prime_x)
+    let idx = 0x80 + vka_end;
+    memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
+
+    // mstore(add(0xa0, vka_end), w_prime_y)
+    let idx = 0xa0 + vka_end;
+    memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
+
+    let s = mload(memory, theta_mptr as u32 + 0xe0)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+            ),
+        })?
+        .into_fr();
+    ec_mul_tmp::<H>(memory, &s);
+    let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!(
+                "Unable to load x from memory during pairing_input_computations. Cause: {e}"
+            ),
+        }
+    })?);
+    let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!(
+                "Unable to load y from memory during pairing_input_computations. Cause: {e}"
+            ),
+        }
+    })?);
+    ec_add_acc::<H>(memory, &x, &y);
+
+    // mstore(add(theta_mptr, 0x2C0), mload(vka_end))
+    let idx = theta_mptr + 0x2c0;
+    let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
+        message: format!(
+            "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+        ),
+    })?;
+    memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    // mstore(add(theta_mptr, 0x2E0), mload(add(0x20, vka_end)))
+    let idx = theta_mptr + 0x2e0;
+    let bytes = mload(memory, 0x20 + vka_end as u32).map_err(|e| VerifyError::KeyError {
+        message: format!(
+            "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+        ),
+    })?;
+    memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    // mstore(add(theta_mptr, 0x300), w_prime_x)
+    let idx = theta_mptr + 0x300;
+    memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
+
+    // mstore(add(theta_mptr, 0x320), w_prime_y)
+    let idx = theta_mptr + 0x320;
+    memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
+
+    Ok(())
+}
+
+// Compute pairing lhs and rhs
+fn compute_pairing_lhs_and_rhs<H: CurveHooks>(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    vka_end: usize,
+    theta_mptr: usize,
+) -> Result<(), VerifyError> {
+    let mut pcs_ptr =
+        mload_u32(memory, 0x03a0 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!("Unable to read pcs_ptr from memory. Cause: {e}"),
+            }
+        })? as usize;
+    let coeff_ptr = vka_end + 0x20;
+
+    pcs_ptr = perform_point_computations(memory, vka_end, theta_mptr, pcs_ptr)?;
+    pcs_ptr = perform_vanishing_computations(memory, vka_end, theta_mptr, pcs_ptr)?;
+    pcs_ptr = perform_coeff_computations(memory, pcs_ptr)?;
+    pcs_ptr = perform_normalized_coeff_computations(memory, vka_end, pcs_ptr)?;
+    pcs_ptr =
+        perform_r_evals_computations(memory, raw_proof, vka_end, theta_mptr, pcs_ptr, coeff_ptr)?;
+    pcs_ptr = perform_coeff_sums_computation(memory, vka_end, pcs_ptr)?;
+    pcs_ptr = perform_r_eval_computation(memory, vka_end, theta_mptr, pcs_ptr)?;
+
+    perform_pairing_input_computations::<H>(memory, raw_proof, vka_end, theta_mptr, pcs_ptr)?;
+
+    Ok(())
+}
+
+// Random linear combine with accumulator.
+fn random_linear_combine_with_accumulator<H: CurveHooks>(
+    memory: &mut [u8],
+    vka_end: usize,
+    theta_mptr: usize,
+) -> Result<(), VerifyError> {
+    let has_accumulator = !mload(memory, 0x0140 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read has_accumulator field from VKA. Cause: {e}"),
+        })?
+        .into_u256()
+        .is_zero();
+    if has_accumulator {
+        //     mstore(add(0x00, vka_end), mload(add(theta_mptr, 0x100)))
+        let mut bytes =
+            mload(memory, theta_mptr as u32 + 0x100).map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to read from memory during random linear combine. Cause: {e}"
+                ),
+            })?;
+        memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
+        //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x120)))
+        bytes = mload(memory, theta_mptr as u32 + 0x120).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
+        //     mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x140)))
+        bytes = mload(memory, theta_mptr as u32 + 0x140).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(&bytes);
+        //     mstore(add(0x60, vka_end), mload(add(theta_mptr, 0x160)))
+        bytes = mload(memory, theta_mptr as u32 + 0x160).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(&bytes);
+        //     mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x2c0)))
+        bytes = mload(memory, theta_mptr as u32 + 0x2c0).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(&bytes);
+        //     mstore(add(0xa0, vka_end), mload(add(theta_mptr, 0x2e0)))
+        bytes = mload(memory, theta_mptr as u32 + 0x2e0).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[(vka_end + 0xa0)..(vka_end + 0xc0)].copy_from_slice(&bytes);
+        //     mstore(add(0xc0, vka_end), mload(add(theta_mptr, 0x300)))
+        bytes = mload(memory, theta_mptr as u32 + 0x300).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[(vka_end + 0xc0)..(vka_end + 0xe0)].copy_from_slice(&bytes);
+        //     mstore(add(0xe0, vka_end), mload(add(theta_mptr, 0x320)))
+        bytes = mload(memory, theta_mptr as u32 + 0x320).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[(vka_end + 0xe0)..(vka_end + 0x100)].copy_from_slice(&bytes);
+
+        // let challenge := mod(keccak256(vka_end, add(0x100, vka_end)), R)
+        let challenge = {
+            let start = vka_end;
+            let end = vka_end + 0x100 + vka_end;
+            let hash: [u8; 32] = Keccak256::new()
+                .chain_update(&memory[start..end])
+                .finalize()
+                .into();
+            hash.into_fr()
+        };
+
+        // [pairing_lhs] += challenge * [acc_lhs]
+        ec_mul_acc::<H>(memory, &challenge);
+        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).map_err(
+            |e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load x from memory during random linear combine phase. Cause: {e}"
+                ),
+            },
+        )?);
+        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).map_err(
+            |e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load y from memory during random linear combine phase. Cause: {e}"
+                ),
+            },
+        )?);
+        ec_add_acc::<H>(memory, &x, &y);
+        // mstore(add(theta_mptr, 0x2c0), mload(vka_end))
+        let idx = theta_mptr + 0x2c0;
+        let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        // mstore(add(theta_mptr, 0x2e0), mload(add(0x20, vka_end)))
+        let idx = theta_mptr + 0x2e0;
+        let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        // [pairing_rhs] += challenge * [acc_rhs]
+        // mstore(vka_end, mload(add(theta_mptr, 0x140)))
+        let idx = vka_end;
+        let bytes =
+            mload(memory, theta_mptr as u32 + 0x140).map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to read from memory during random linear combine. Cause: {e}"
+                ),
+            })?;
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x160)))
+        let idx = vka_end + 0x20;
+        let bytes =
+            mload(memory, theta_mptr as u32 + 0x160).map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to read from memory during random linear combine. Cause: {e}"
+                ),
+            })?;
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        ec_mul_acc::<H>(memory, &challenge);
+        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).map_err(
+            |e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load x from memory during random linear combine phase. Cause: {e}"
+                ),
+            },
+        )?);
+        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).map_err(
+            |e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load y from memory during random linear combine phase. Cause: {e}"
+                ),
+            },
+        )?);
+        ec_add_acc::<H>(memory, &x, &y);
+        // mstore(add(theta_mptr, 0x300), mload(vka_end))
+        let idx = theta_mptr + 0x300;
+        let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+        // mstore(add(theta_mptr, 0x320), mload(add(0x20, vka_end)))
+        let idx = theta_mptr + 0x320;
+        let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
+        memory[idx..idx + 0x20].copy_from_slice(&bytes);
+    }
+
+    Ok(())
+}
+
+// Performs the final pairing check.
+fn pairing_check<H: CurveHooks>(memory: &mut [u8], theta_mptr: usize) -> Result<(), VerifyError> {
+    // LHS
+    let x =
+        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to read LHS.x from memory during pairing computation phase. Cause: {e}"
+                ),
+            }
+        })?);
+    let y =
+        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to read LHS.y from memory during pairing computation phase. Cause: {e}"
+                ),
+            }
+        })?);
+    let p_0 = G1::<H>::new(x, y);
+    // RHS
+    let x =
+        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to read RHS.x from memory during pairing computation phase. Cause: {e}"
+                ),
+            }
+        })?);
+    let y =
+        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to read RHS.y from memory during pairing computation phase. Cause: {e}"
+                ),
+            }
+        })?);
+    let p_1 = G1::new(x, y);
+
+    let g1_points = [G1Prepared::from(p_0), G1Prepared::from(p_1)];
+
+    let g2_x_1_index = 0x0200 + VKA_OFFSET + MEMORY_OFFSET;
+    let data = &memory[g2_x_1_index..g2_x_1_index + 4 * 0x20];
+    let h1 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
+    // TODO: VALIDATION REQUIRED!
+    // mstore(add(0x40, vka_end), mload( {{ vk_const_offsets["g2_x_1"]|hex() }}))
+    // mstore(add(0x60, vka_end), mload( {{ vk_const_offsets["g2_x_2"]|hex() }}))
+    // mstore(add(0x80, vka_end), mload( {{ vk_const_offsets["g2_y_1"]|hex() }}))
+    // mstore(add(0xa0, vka_end), mload( {{ vk_const_offsets["g2_y_2"]|hex() }}))
+
+    let neg_s_g2_x_1_index = 0x0280 + VKA_OFFSET + MEMORY_OFFSET;
+    let data = &memory[neg_s_g2_x_1_index..neg_s_g2_x_1_index + 4 * 0x20];
+    let h2 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
+    // TODO: VALIDATION REQUIRED!
+    // mstore(add(0x100, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_1"]|hex() }}))
+    // mstore(add(0x120, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_2"]|hex() }}))
+    // mstore(add(0x140, vka_end), mload( {{ vk_const_offsets["neg_s_g2_y_1"]|hex() }}))
+    // mstore(add(0x160, vka_end), mload( {{ vk_const_offsets["neg_s_g2_y_2"]|hex() }}))
+
+    let g2_points = [G2Prepared::from(h1), G2Prepared::from(h2)];
+
+    let product = Bn254::<H>::multi_pairing(g1_points, g2_points);
+
+    if product.0.is_one() {
+        Ok(())
+    } else {
+        Err(VerifyError::VerificationError)
+    }
 }
 
 #[cfg(test)]
