@@ -238,6 +238,7 @@ fn verify_proof_inner<H: CurveHooks>(
                 });
             }
         };
+
         // nu
         match squeeze_challenge_cont(memory, vka_end, challenge_mptr) {
             Ok(new_challenge_mptr) => {
@@ -2114,7 +2115,9 @@ fn z_evals(
     );
 
     // iterate through col_evals to update the quotient_eval_numer accumulator
-    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap()); // free memory pointer
+    let fmp = u32_from_be_tail(
+        &mload(memory, 0x40).expect("Should be able to load fmp from memory at this point."),
+    ); // free memory pointer
     let temp = fmp + 0x20;
     let end_ptr = u32_from_be_tail(&mload(memory, temp).unwrap()) as usize;
     let start = fmp as usize + 0x40;
@@ -2266,7 +2269,8 @@ fn mv_lookup_evals(
     y: Fr,
 ) -> Result<(usize, Fr, Fr), ()> {
     // load the free memory pointer
-    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let fmp =
+        u32_from_be_tail(&mload(memory, 0x40).expect("Should be able to load fmp at this point."));
     // iterate through the input_tables_len
     let mut evals = mload(memory, evals_ptr as u32).unwrap().into_u256();
     // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
@@ -2299,7 +2303,6 @@ fn mv_lookup_evals(
     let outer_inputs_len = lsb16(&input_expression);
     input_expression >>= 16;
     // shift up the inputs iterator by the free static memory offset of 0xa0
-    // for { let j := 0xa0 + fmp } lt(j, outer_inputs_len + 0xa0 + fmp) { j := add(j, 0x20) } {
     for j in
         ((0xa0 + fmp as usize)..(outer_inputs_len as usize + 0xa0 + fmp as usize)).step_by(0x20)
     {
@@ -2325,7 +2328,6 @@ fn mv_lookup_evals(
     } else {
         // iterate through the outer_inputs_len
         let last_idx = outer_inputs_len - 0x20;
-        // for { let i := 0 } lt(i, outer_inputs_len) { i := add(i, 0x20) } {
         for i in (0..outer_inputs_len).step_by(0x20) {
             let mut tmp = mload(memory, 0xa0 + fmp).unwrap().into_fr();
             let mut j = 0x20;
@@ -2333,7 +2335,6 @@ fn mv_lookup_evals(
                 tmp = mload(memory, 0xc0 + fmp).unwrap().into_fr();
                 j = 0x40;
             }
-            // for { } lt(j, outer_inputs_len) { j := add(j, 0x20) } {
             while j < outer_inputs_len {
                 if i == j {
                     continue;
@@ -2349,7 +2350,6 @@ fn mv_lookup_evals(
     }
 
     let mut tmp = mload(memory, 0xa0 + fmp).unwrap().into_fr();
-    // for { let j := 0x20 } lt(j, outer_inputs_len) { j := add(j, 0x20) } {
     for j in (0x20..outer_inputs_len).step_by(0x20) {
         tmp *= mload(memory, j as u32 + 0xa0 + fmp).unwrap().into_fr();
     }
@@ -2382,7 +2382,9 @@ fn lookup_evals(
     y: Fr,
 ) -> Result<(usize, Fr, Fr), ()> {
     // load the free memory pointer
-    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let fmp = u32_from_be_tail(
+        &mload(memory, 0x40).expect("Should be able to load fmp from memory at this point."),
+    );
     // iterate through the input_tables_len
     let mut evals = mload(memory, evals_ptr as u32).unwrap().into_u256();
     // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
@@ -2540,7 +2542,9 @@ fn ec_mul_acc<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
 // Add (x, y) into point at (0x00, 0x20).
 // Return updated (success).
 fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()> {
-    let vka_end = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let vka_end = u32_from_be_tail(
+        &mload(memory, 0x40).expect("Should be able to load vka_end from memory."),
+    );
 
     let point1 = read_g1::<H>(&memory, vka_end as usize)
         .unwrap()
@@ -2566,7 +2570,9 @@ fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
 // Add (x, y) into point at (0x80, 0xa0).
 // Return updated (success).
 fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()> {
-    let vka_end = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let vka_end = u32_from_be_tail(
+        &mload(memory, 0x40).expect("Should be able to load vka_end from memory."),
+    );
 
     let point1 = read_g1::<H>(&memory, vka_end as usize + 0x80)
         .unwrap()
@@ -2592,7 +2598,9 @@ fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
 // Scale point at (0x80, 0xa0) by scalar.
 // Return updated (success).
 fn ec_mul_tmp<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
-    let vka_end = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let vka_end = u32_from_be_tail(
+        &mload(memory, 0x40).expect("Should be able to load vka_end from memory."),
+    );
 
     let point = read_g1::<H>(&memory, (vka_end + 0x80) as usize)
         .unwrap()
@@ -2612,7 +2620,9 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
     let coeff_len = lsb8(&coeff_len_data);
     let ret = coeff_len_data >> 8;
 
-    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let fmp = u32_from_be_tail(
+        &mload(memory, 0x40).expect("Should be able to load vka_end from memory."),
+    );
     match coeff_len {
         0x01 => {
             // We only encode the points if the coeff length is greater than 1.
@@ -2812,7 +2822,9 @@ fn pairing_input_computations_first<H: CurveHooks>(
     mut data: U256,
     theta_mptr: u32,
 ) -> Result<(), ()> {
-    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let fmp = u32_from_be_tail(
+        &mload(memory, 0x40).expect("Should be able to read fmp from memory at this point."),
+    );
     // mstore(mload(0x40), calldataload(and(data, PTR_BITMASK)))
     let idx = fmp as usize;
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
@@ -2960,7 +2972,9 @@ fn pairing_input_computations<H: CurveHooks>(
     mut data: U256,
     theta_mptr: u32,
 ) -> Result<(), ()> {
-    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let fmp = u32_from_be_tail(
+        &mload(memory, 0x40).expect("Should be able to read fmp from memory at this point."),
+    );
     // mstore(add(0x80, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
     let idx = 0x80 + fmp as usize;
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
