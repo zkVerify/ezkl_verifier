@@ -18,6 +18,7 @@ use ark_ff::{AdditiveGroup, BigInteger, Field, One, PrimeField, fields::batch_in
 use ark_models_ext::bn::{G1Prepared, G2Prepared};
 use core::ops::BitAnd;
 use sha3::{Digest, Keccak256};
+use std::os::linux::raw;
 
 use crate::{
     constants::{BYTE_FLAG_BITMASK, DELTA, PTR_BITMASK},
@@ -333,119 +334,22 @@ fn verify_proof_inner<H: CurveHooks>(
         let mut quotient_eval_numer = Fr::ONE;
         let y = mload(memory, theta_mptr as u32 + 0x60)
             .map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to read y from memory. Cause: {e}"),
+                message: format!("Failed to read evaluation point y from memory. Cause: {e}"),
             })?
             .into_fr();
 
         quotient_eval_numer =
             perform_gate_computations(memory, raw_proof, vka_end, quotient_eval_numer, y)?;
 
-        {
-            // Permutation computations
-            let mut permutation_z_evals_ptr = mload_u32(
-                memory,
-                0x0360 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32,
-            )
-            .map_err(|e| VerifyError::KeyError {
-                message: format!(
-                    "Unable to read permutation_computations_len_offset as an u32. Cause: {e}"
-                ),
-            })?;
+        quotient_eval_numer = perform_permutation_computations(
+            memory,
+            raw_proof,
+            vka_end,
+            theta_mptr,
+            quotient_eval_numer,
+            y,
+        )?;
 
-            let mut permutation_z_evals = mload(memory, permutation_z_evals_ptr)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to read permutation_z_evals from memory. Cause: {e}"),
-                })?
-                .into_u256();
-            // Last idx of permutation evals == permutation_evals.len() - 1
-            let last_idx = lsb8(&permutation_z_evals);
-
-            permutation_z_evals >>= 8;
-            // Num of words scaled by 0x20 that take up each permutation eval (permutation_z_eval + column evals)
-            // first and second LSG bytes contain the number of words for all of the permutation evals except the last.
-            // The third and fourth LSG bytes contain the number of words for the last permutation eval
-            let num_words = lsb32(&permutation_z_evals);
-            permutation_z_evals >>= 32;
-            permutation_z_evals_ptr += 0x20;
-            permutation_z_evals = mload(memory, permutation_z_evals_ptr)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to read permutation_z_evals from memory. Cause: {e}"),
-                })?
-                .into_u256();
-            let l_0 = mload(memory, theta_mptr as u32 + 0x200)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to read l_0 from memory. Cause: {e}"),
-                })?
-                .into_fr();
-
-            {
-                // Get the first and second LSG bytes from the first permutation_z_evals word to load in (z, _, _)
-                let idx = lsb16(&permutation_z_evals) as u32;
-                let eval = l_0
-                    - l_0 * load_from_proof(raw_proof, idx)
-                        .map_err(|e| VerifyError::InvalidProofError {
-                            message: format!(
-                                "Unable to update eval during permutation computations. Cause: {e}"
-                            ),
-                        })?
-                        .into_fr();
-                quotient_eval_numer = quotient_eval_numer * y + eval;
-            }
-
-            {
-                // Load in the last permutation_z_evals word
-                let perm_z_last_ptr = last_idx * (num_words & PTR_BITMASK as usize)
-                    + permutation_z_evals_ptr as usize;
-
-                let idx = lsb16(
-                    &mload(memory, perm_z_last_ptr as u32)
-                        .map_err(|e| VerifyError::KeyError {
-                            message: format!(
-                                "Unable to read perm_z_last's address from memory. Cause: {e}"
-                            ),
-                        })?
-                        .into_u256(),
-                ) as u32;
-                let perm_z_last = load_from_proof(raw_proof, idx)
-                    .map_err(|e| VerifyError::InvalidProofError {
-                        message: format!("Unable to load perm_z_last from proof. Cause: {e}"),
-                    })?
-                    .into_fr();
-
-                quotient_eval_numer = quotient_eval_numer * y
-                    + mload(memory, theta_mptr as u32 + 0x1C0).map_err(|e| VerifyError::KeyError {
-                            message: format!(
-                                "Unable to update quotient_eval_numer during permutation computations. Cause: {e}"
-                            ),
-                        })?.into_fr()
-                        * (perm_z_last * perm_z_last - perm_z_last);
-
-                let lhs = mload(memory, theta_mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError {
-                            message: format!(
-                                "Unable to load lhs when loading in the last permutation_z_evals word. Cause: {e}"
-                            ),
-                        })?.into_fr();
-                let rhs = mload(memory, theta_mptr as u32 + 0x80).map_err(|e| VerifyError::KeyError {
-                            message: format!(
-                                "Unable to load rhs when loading in the last permutation_z_evals word. Cause: {e}"
-                            ),
-                        })?.into_fr();
-                memory[vka_end..vka_end + 0x20].copy_from_slice(&(lhs * rhs).into_be_bytes32());
-
-                quotient_eval_numer = z_evals(
-                    memory,
-                    raw_proof,
-                    permutation_z_evals,
-                    &num_words.into_u256(),
-                    perm_z_last_ptr,
-                    permutation_z_evals_ptr as usize,
-                    theta_mptr,
-                    l_0,
-                    y,
-                    quotient_eval_numer,
-                );
-            }
-        }
         {
             // lookup computations
             // mstore(vka_end, mload(add(theta_mptr, 0x1C0)))
@@ -3157,6 +3061,122 @@ fn perform_gate_computations(
                 });
             }
         }
+    }
+
+    Ok(quotient_eval_numer)
+}
+
+// Perform permutation computations. Returns updated quotient_eval_numer.
+fn perform_permutation_computations(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    vka_end: usize,
+    theta_mptr: usize,
+    mut quotient_eval_numer: Fr,
+    y: Fr,
+) -> Result<Fr, VerifyError> {
+    let mut permutation_z_evals_ptr =
+        mload_u32(memory, 0x0360 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to read permutation_computations_len_offset as an u32. Cause: {e}"
+                ),
+            }
+        })?;
+
+    let mut permutation_z_evals = mload(memory, permutation_z_evals_ptr)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read permutation_z_evals from memory. Cause: {e}"),
+        })?
+        .into_u256();
+    // Last idx of permutation evals == permutation_evals.len() - 1
+    let last_idx = lsb8(&permutation_z_evals);
+
+    permutation_z_evals >>= 8;
+    // Num of words scaled by 0x20 that take up each permutation eval (permutation_z_eval + column evals)
+    // first and second LSG bytes contain the number of words for all of the permutation evals except the last.
+    // The third and fourth LSG bytes contain the number of words for the last permutation eval
+    let num_words = lsb32(&permutation_z_evals);
+    permutation_z_evals >>= 32;
+    permutation_z_evals_ptr += 0x20;
+    permutation_z_evals = mload(memory, permutation_z_evals_ptr)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read permutation_z_evals from memory. Cause: {e}"),
+        })?
+        .into_u256();
+    let l_0 = mload(memory, theta_mptr as u32 + 0x200)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read l_0 from memory. Cause: {e}"),
+        })?
+        .into_fr();
+
+    {
+        // Get the first and second LSG bytes from the first permutation_z_evals word to load in (z, _, _)
+        let idx = lsb16(&permutation_z_evals) as u32;
+        let eval = l_0
+            - l_0
+                * load_from_proof(raw_proof, idx)
+                    .map_err(|e| VerifyError::InvalidProofError {
+                        message: format!(
+                            "Unable to update eval during permutation computations. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr();
+        quotient_eval_numer = quotient_eval_numer * y + eval;
+    }
+
+    {
+        // Load in the last permutation_z_evals word
+        let perm_z_last_ptr =
+            last_idx * (num_words & PTR_BITMASK as usize) + permutation_z_evals_ptr as usize;
+
+        let idx = lsb16(
+            &mload(memory, perm_z_last_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to read perm_z_last's address from memory. Cause: {e}"
+                    ),
+                })?
+                .into_u256(),
+        ) as u32;
+        let perm_z_last = load_from_proof(raw_proof, idx)
+            .map_err(|e| VerifyError::InvalidProofError {
+                message: format!("Unable to load perm_z_last from proof. Cause: {e}"),
+            })?
+            .into_fr();
+
+        quotient_eval_numer = quotient_eval_numer * y
+            + mload(memory, theta_mptr as u32 + 0x1C0).map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to update quotient_eval_numer during permutation computations. Cause: {e}"
+                    ),
+                })?.into_fr()
+                * (perm_z_last * perm_z_last - perm_z_last);
+
+        let lhs = mload(memory, theta_mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load lhs when loading in the last permutation_z_evals word. Cause: {e}"
+                    ),
+                })?.into_fr();
+        let rhs = mload(memory, theta_mptr as u32 + 0x80).map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load rhs when loading in the last permutation_z_evals word. Cause: {e}"
+                    ),
+                })?.into_fr();
+        memory[vka_end..vka_end + 0x20].copy_from_slice(&(lhs * rhs).into_be_bytes32());
+
+        quotient_eval_numer = z_evals(
+            memory,
+            raw_proof,
+            permutation_z_evals,
+            &num_words.into_u256(),
+            perm_z_last_ptr,
+            permutation_z_evals_ptr as usize,
+            theta_mptr,
+            l_0,
+            y,
+            quotient_eval_numer,
+        );
     }
 
     Ok(quotient_eval_numer)
