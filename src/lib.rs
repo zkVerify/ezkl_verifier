@@ -327,462 +327,28 @@ fn verify_proof_inner<H: CurveHooks>(
     }
 
     compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
-
     perform_quotient_evaluation(memory, raw_proof, vka_end, theta_mptr)?;
-
     compute_quotient_commitment::<H>(memory, raw_proof, vka_end, theta_mptr)?; // TODO: REMOVE H IF IT IS UNECESSARY...
 
     // Compute pairing lhs and rhs
     {
-        // point_computations
         let mut pcs_ptr = mload_u32(memory, 0x03a0 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
             .map_err(|e| VerifyError::KeyError {
                 message: format!("Unable to read pcs_ptr from memory. Cause: {e}"),
             })? as usize;
-        {
-            let mut point_computations = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load point_computations from memory. Cause: {e}"),
-                })?
-                .into_u256();
-            let x = mload(memory, theta_mptr as u32 + 0x80)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load x from memory. Cause: {e}"),
-                })?
-                .into_fr(); // Is this a point or a scalar?
-            let omega = mload(memory, 0x0180)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load omega from memory. Cause: {e}"),
-                })?
-                .into_fr();
-            let omega_inv = mload(memory, 0x01a0)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load omega_inv from memory. Cause: {e}"),
-                })?
-                .into_fr();
-            let mut x_pow_of_omega = x * omega;
-            (x_pow_of_omega, pcs_ptr) = point_rots(
-                memory,
-                point_computations,
-                pcs_ptr,
-                8,
-                x_pow_of_omega,
-                omega,
-                vka_end,
-            )
-            .unwrap();
-            pcs_ptr += 0x20;
-            point_computations = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load point_computations from memory. Cause: {e}"),
-                })?
-                .into_u256();
-            // Store interm point
-            // mstore(add(and(point_computations, PTR_BITMASK), vka_end), x)
-            let idx = vka_end + lsb16(&point_computations);
-            memory[idx..idx + 0x20].copy_from_slice(&x.into_be_bytes32());
-            x_pow_of_omega = x * omega_inv;
-            point_computations >>= 16;
-            (x_pow_of_omega, pcs_ptr) = point_rots(
-                memory,
-                point_computations,
-                pcs_ptr,
-                24,
-                x_pow_of_omega,
-                omega_inv,
-                vka_end,
-            )
-            .unwrap();
-            pcs_ptr += 0x20;
-        }
 
-        // vanishing_computations
-        {
-            let mu = mload(memory, theta_mptr as u32 + 0xE0)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load mu from memory. Cause: {e}"),
-                })?
-                .into_fr();
+        pcs_ptr = perform_point_computations(memory, vka_end, theta_mptr, pcs_ptr)?;
+        pcs_ptr = perform_vanishing_computations(memory, vka_end, theta_mptr, pcs_ptr)?;
+        pcs_ptr = perform_coeff_computations(memory, pcs_ptr)?;
+        pcs_ptr = perform_normalized_coeff_computations(memory, vka_end, pcs_ptr)?;
 
-            let mut vanishing_computations = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load vanishing_computations from memory. Cause: {e}"
-                    ),
-                })?
-                .into_u256();
-
-            // mstore(add(0x20, vka_end), 1)
-            memory[(vka_end + 0x20)..(vka_end + 0x40)]
-                .copy_from_slice(&U256::one().into_be_bytes32());
-
-            let mut mptr = lsb16(&vanishing_computations);
-            vanishing_computations >>= 16;
-            let mptr_end = lsb16(&vanishing_computations);
-            vanishing_computations >>= 16;
-            let mut point_mptr = lsb16(&vanishing_computations);
-            while mptr < mptr_end {
-                let idx = vka_end + mptr;
-                let val = mu
-                    - mload(memory, (point_mptr + vka_end) as u32)
-                        .map_err(|e| VerifyError::KeyError { message: format!("Unable to load scalar from memory during vanishing_computations. Cause: {e}") })?
-                        .into_fr();
-                // mstore(add(vka_end, mptr), val);
-                memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
-
-                mptr += 0x20;
-                point_mptr += 0x20;
-            }
-
-            vanishing_computations >>= 16;
-            let num_words = lsb8(&vanishing_computations);
-            vanishing_computations >>= 8;
-            let mut s = mload(memory, (vka_end + lsb16(&vanishing_computations)) as u32)
-                .map_err(|e| VerifyError::KeyError { message: format!("Unable to initialize s with scalar from memory during vanishing_computations. Cause: {e}") })?
-                .into_fr();
-            vanishing_computations >>= 16;
-            for _ in 0..num_words {
-                while !vanishing_computations.is_zero() {
-                    s = s * mload(memory, (vka_end + lsb16(&vanishing_computations)) as u32)
-                        .map_err(|e| VerifyError::KeyError {
-                            message: format!(
-                                "Unable to update s during vanishing_computations. Cause: {e}"
-                            ),
-                        })?
-                        .into_fr();
-                    vanishing_computations >>= 16;
-                }
-                pcs_ptr += 0x20;
-                vanishing_computations = mload(memory, pcs_ptr as u32)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!(
-                            "Unable to load vanishing_computations from memory. Cause: {e}"
-                        ),
-                    })?
-                    .into_u256();
-            }
-            let mut diff_ptr = vka_end + lsb16(&vanishing_computations);
-            // mstore(diff_ptr, s)
-            memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&s.into_be_bytes32());
-
-            vanishing_computations >>= 16;
-            let mut diff: Fr;
-            let sets_len = lsb16(&vanishing_computations);
-            pcs_ptr += 0x20;
-            vanishing_computations = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load vanishing_computations from memory. Cause: {e}"
-                    ),
-                })?
-                .into_u256();
-            for i in 0..sets_len {
-                diff = mload(memory, (lsb16(&vanishing_computations) + vka_end) as u32)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!("Unable to load diff from memory. Cause: {e}"),
-                    })?
-                    .into_fr();
-                vanishing_computations >>= 16;
-                while !vanishing_computations.is_zero() {
-                    diff = diff
-                        * mload(memory, (lsb16(&vanishing_computations) + vka_end) as u32)
-                            .map_err(|e| VerifyError::KeyError {
-                                message: format!(
-                                    "Unable to read scalar from memory in order to update diff. Cause: {e}"
-                                ),
-                            })?
-                            .into_fr();
-                    vanishing_computations >>= 16;
-                }
-                diff_ptr += 0x20;
-                // mstore(diff_ptr, diff)
-                memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&diff.into_be_bytes32());
-
-                if i == 0 {
-                    // mstore(vka_end, diff)
-                    memory[vka_end..vka_end + 0x20].copy_from_slice(&diff.into_be_bytes32());
-                }
-                pcs_ptr += 0x20;
-                vanishing_computations = mload(memory, pcs_ptr as u32)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!(
-                            "Unable to load vanishing_computations from memory. Cause: {e}"
-                        ),
-                    })?
-                    .into_u256();
-            }
-        }
-        // coeff_computations
-        {
-            let mut coeff_len_data = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load coeff_len_data from memory. Cause: {e}"),
-                })?
-                .into_u256();
-
-            // Load in the least significant byte of the `coeff_len_data` word to get the total number
-            // of words we will need to load in that contains the packed Vec<set.rots().len()>.
-            let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&coeff_len_data);
-
-            coeff_len_data >>= 8;
-
-            let mut i = pcs_ptr;
-            pcs_ptr = end_ptr_packed_lens;
-            while i < end_ptr_packed_lens {
-                while !coeff_len_data.is_zero() {
-                    let coeff_data = mload(memory, pcs_ptr as u32)
-                        .map_err(|e| VerifyError::KeyError {
-                            message: format!("Unable to load coeff_data from memory. Cause: {e}"),
-                        })?
-                        .into_u256();
-                    coeff_len_data = coeff_computations(memory, coeff_len_data, coeff_data);
-                    pcs_ptr += 0x20;
-                }
-                coeff_len_data = mload(memory, i as u32 + 0x20)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!("Unable to load coeff_len_data from memory. Cause: {e}"),
-                    })?
-                    .into_u256();
-                i += 0x20;
-            }
-        }
-        // normalized_coeff_computations
-        {
-            let mut norm_coeff_data = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load norm_coeff_data from memory during normalized_coeff_computations. Cause: {e}"),
-                })?
-                .into_u256();
-
-            batch_invert_in_memory(
-                memory,
-                vka_end as u32,
-                (vka_end + lsb16(&norm_coeff_data)) as u32,
-            );
-
-            norm_coeff_data >>= 16;
-
-            let diff_0_inv = mload(memory, vka_end as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load diff_0_inv from memory during normalized_coeff_computations. Cause: {e}"),
-                })?
-                .into_fr();
-            let mptr0 = lsb16(&norm_coeff_data) + vka_end;
-            norm_coeff_data >>= 16;
-
-            // mstore(mptr0, diff_0_inv)
-            memory[mptr0..mptr0 + 0x20].copy_from_slice(&diff_0_inv.into_be_bytes32());
-
-            let mptr_end = mptr0 + lsb16(&norm_coeff_data);
-            for mptr in ((mptr0 + 0x20)..mptr_end).step_by(0x20) {
-                // mstore(mptr, mulmod(mload(mptr), diff_0_inv, R))
-                let val = mload(memory, mptr as u32).map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load scalar from memory during normalized_coeff_computations. Cause: {e}"),
-                })?.into_fr() * diff_0_inv;
-                memory[mptr..mptr + 0x20].copy_from_slice(&val.into_be_bytes32());
-            }
-            pcs_ptr += 0x20;
-        }
         let mut coeff_ptr = vka_end + 0x20;
 
-        // r_evals_computations
-        {
-            let mut r_evals_meta_data = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load r_evals_meta_data from memory. Cause: {e}"),
-                })?
-                .into_u256();
-
-            let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&r_evals_meta_data);
-            r_evals_meta_data >>= 8;
-            let mut set_coeff = lsb16(&r_evals_meta_data) + vka_end;
-            r_evals_meta_data >>= 16;
-            let mut r_eval_mptr = lsb16(&r_evals_meta_data) + vka_end;
-            r_evals_meta_data >>= 16;
-            let mut i = pcs_ptr;
-            pcs_ptr = end_ptr_packed_lens;
-            let zeta = mload(memory, theta_mptr as u32 + 0xA0)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load zeta from memory. Cause: {e}"),
-                })?
-                .into_fr();
-            let quotient_eval = mload(memory, theta_mptr as u32 + 0x240)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load quotient_eval from memory. Cause: {e}"),
-                })?
-                .into_fr();
-            let mut not_first = false;
-            let mut r_eval: Fr;
-            while i < end_ptr_packed_lens {
-                while !r_evals_meta_data.is_zero() {
-                    (r_eval, pcs_ptr) = r_evals_computation(
-                        memory,
-                        raw_proof,
-                        lsb8(&r_evals_meta_data) as u32,
-                        pcs_ptr as u32,
-                        zeta,
-                        quotient_eval,
-                        coeff_ptr as u32,
-                    )
-                    .map_err(|_| VerifyError::OtherError {
-                        message: "".to_string(),
-                    })?; // TODO: REVISIT WHEN DOING ERROR HANDLING...
-                    coeff_ptr = coeff_ptr + lsb8(&r_evals_meta_data);
-                    r_evals_meta_data >>= 8;
-                    if not_first {
-                        r_eval *= mload(memory, set_coeff as u32)
-                            .map_err(|e| VerifyError::KeyError {
-                                message: format!(
-                                    "Unable to load set_coeff from memory. Cause: {e}"
-                                ),
-                            })?
-                            .into_fr();
-                        set_coeff += 0x20;
-                    }
-                    not_first = true;
-                    // mstore(r_eval_mptr, r_eval)
-                    memory[r_eval_mptr..r_eval_mptr + 0x20]
-                        .copy_from_slice(&r_eval.into_be_bytes32());
-
-                    r_eval_mptr += 0x20;
-                }
-                r_evals_meta_data = mload(memory, i as u32 + 0x20)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!(
-                            "Unable to load r_evals_meta_data from memory. Cause: {e}"
-                        ),
-                    })?
-                    .into_u256();
-                i += 0x20;
-            }
-        }
-        // coeff_sums_computation
-        {
-            let mut coeff_sums_data = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load coeff_sums_data from memory. Cause: {e}"),
-                })?
-                .into_u256();
-
-            let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&coeff_sums_data);
-            coeff_sums_data >>= 8;
-            coeff_ptr = vka_end + 0x20;
-
-            let mut i = pcs_ptr;
-            pcs_ptr = end_ptr_packed_lens;
-            while i < end_ptr_packed_lens {
-                while !coeff_sums_data.is_zero() {
-                    let mut sum = mload(memory, coeff_ptr as u32)
-                        .map_err(|e| VerifyError::KeyError {
-                            message: format!(
-                                "Unable to load initial value for sum from memory. Cause: {e}"
-                            ),
-                        })?
-                        .into_fr();
-                    let len = lsb8(&coeff_sums_data);
-                    coeff_sums_data >>= 8;
-                    for j in (0x20..len).step_by(0x20) {
-                        sum += mload(memory, (coeff_ptr + j) as u32)
-                            .map_err(|e| VerifyError::KeyError {
-                                message: format!(
-                                    "Unable to update sum during coeff_sums_computation. Cause: {e}"
-                                ),
-                            })?
-                            .into_fr(); // TODO: DOUBLE-CHECK: (coeff_ptr + j) as u32 fits into a `u32`
-                    }
-                    coeff_ptr += len;
-                    let idx = lsb16(&coeff_sums_data) + vka_end;
-                    // mstore(idx, sum)
-                    memory[idx..idx + 0x20].copy_from_slice(&sum.into_be_bytes32());
-
-                    coeff_sums_data >>= 16;
-                }
-                coeff_sums_data = mload(memory, i as u32 + 0x20)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!("Unable to load coeff_sums_data from memory. Cause: {e}"),
-                    })?
-                    .into_u256();
-                i += 0x20;
-            }
-        }
-        // r_eval_computation
-        {
-            let mut r_eval_data = mload(memory, pcs_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to load r_eval_data from memory. Cause: {e}"),
-                })?
-                .into_u256();
-
-            let mptr_end = lsb16(&r_eval_data) + vka_end;
-
-            let mut mptr = vka_end;
-            r_eval_data >>= 16;
-            let mut sum_mptr = lsb16(&r_eval_data) + vka_end;
-            while mptr < mptr_end {
-                // mstore(mptr, mload(sum_mptr))
-                let bytes = mload(memory, sum_mptr as u32).map_err(|e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to load scalar from memory during r_eval_computation. Cause: {e}"
-                    ),
-                })?;
-                memory[mptr..mptr + 0x20].copy_from_slice(&bytes);
-
-                mptr += 0x20;
-                sum_mptr += 0x20;
-            }
-            r_eval_data >>= 16;
-
-            batch_invert_in_memory(memory, vka_end as u32, mptr_end as u32);
-
-            let r_eval_ptr = lsb16(&r_eval_data) + vka_end;
-            let mut r_eval = mload(memory, mptr_end as u32 - 0x20)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to initialize r_eval. Cause: {e}"),
-                })?
-                .into_fr()
-                * mload(memory, r_eval_ptr as u32)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!("Unable to initialize r_eval. Cause: {e}"),
-                    })?
-                    .into_fr();
-            r_eval_data >>= 16;
-
-            let mut sum_inv_mptr = mptr_end - 0x40;
-            let sum_inv_mptr_end = vka_end - 0x20;
-            let mut r_eval_mptr = r_eval_ptr - 0x20;
-
-            while sum_inv_mptr > sum_inv_mptr_end {
-                r_eval *= mload(memory, theta_mptr as u32 + 0xc0)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!(
-                            "Unable to update r_eval during r_eval computation. Cause: {e}"
-                        ),
-                    })?
-                    .into_fr();
-                r_eval += mload(memory, sum_inv_mptr as u32)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!(
-                            "Unable to update r_eval during r_eval computation. Cause: {e}"
-                        ),
-                    })?
-                    .into_fr()
-                    * mload(memory, r_eval_mptr as u32)
-                        .map_err(|e| VerifyError::KeyError {
-                            message: format!(
-                                "Unable to update r_eval during r_eval computation. Cause: {e}"
-                            ),
-                        })?
-                        .into_fr();
-
-                sum_inv_mptr -= 0x20;
-                r_eval_mptr -= 0x20;
-            }
-            // mstore(add(theta_mptr, 0x2A0), r_eval)
-            let idx = theta_mptr + 0x2a0;
-            memory[idx..idx + 0x20].copy_from_slice(&r_eval.into_be_bytes32());
-
-            pcs_ptr += 0x20;
-        }
+        pcs_ptr = perform_r_evals_computations(
+            memory, raw_proof, vka_end, theta_mptr, pcs_ptr, coeff_ptr,
+        )?;
+        pcs_ptr = perform_coeff_sums_computation(memory, vka_end, pcs_ptr)?;
+        pcs_ptr = perform_r_eval_computation(memory, vka_end, theta_mptr, pcs_ptr)?;
 
         // pairing_input_computations
         let mut nu = mload(memory, theta_mptr as u32 + 0xC0)
@@ -3093,7 +2659,7 @@ fn perform_lookup_computations(
     Ok(quotient_eval_numer)
 }
 
-// Compute quotient evaluation
+// Compute quotient evaluation.
 fn perform_quotient_evaluation(
     memory: &mut [u8],
     raw_proof: &[u8],
@@ -3209,6 +2775,484 @@ fn compute_quotient_commitment<H: CurveHooks>(
     memory[(theta_mptr + 0x280)..(theta_mptr + 0x280 + 0x20)].copy_from_slice(&bytes);
 
     Ok(())
+}
+
+// Performs point_computations. Returns updated pcs_ptr.
+fn perform_point_computations(
+    memory: &mut [u8],
+    vka_end: usize,
+    theta_mptr: usize,
+    mut pcs_ptr: usize,
+) -> Result<usize, VerifyError> {
+    let mut point_computations = mload(memory, pcs_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load point_computations from memory. Cause: {e}"),
+        })?
+        .into_u256();
+    let x = mload(memory, theta_mptr as u32 + 0x80)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load x from memory. Cause: {e}"),
+        })?
+        .into_fr(); // Is this a point or a scalar?
+    let omega = mload(memory, 0x0180)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load omega from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let omega_inv = mload(memory, 0x01a0)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load omega_inv from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let mut x_pow_of_omega = x * omega;
+    (_, pcs_ptr) = point_rots(
+        memory,
+        point_computations,
+        pcs_ptr,
+        8,
+        x_pow_of_omega,
+        omega,
+        vka_end,
+    )
+    .unwrap();
+    pcs_ptr += 0x20;
+    point_computations = mload(memory, pcs_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load point_computations from memory. Cause: {e}"),
+        })?
+        .into_u256();
+    // Store interm point
+    // mstore(add(and(point_computations, PTR_BITMASK), vka_end), x)
+    let idx = vka_end + lsb16(&point_computations);
+    memory[idx..idx + 0x20].copy_from_slice(&x.into_be_bytes32());
+    x_pow_of_omega = x * omega_inv;
+    point_computations >>= 16;
+    (_, pcs_ptr) = point_rots(
+        memory,
+        point_computations,
+        pcs_ptr,
+        24,
+        x_pow_of_omega,
+        omega_inv,
+        vka_end,
+    )
+    .unwrap();
+    pcs_ptr += 0x20;
+
+    Ok(pcs_ptr)
+}
+
+// Performs vanishing computations. Returns updated pcs_ptr.
+fn perform_vanishing_computations(
+    memory: &mut [u8],
+    vka_end: usize,
+    theta_mptr: usize,
+    mut pcs_ptr: usize,
+) -> Result<usize, VerifyError> {
+    let mu = mload(memory, theta_mptr as u32 + 0xE0)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load mu from memory. Cause: {e}"),
+        })?
+        .into_fr();
+
+    let mut vanishing_computations = mload(memory, pcs_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load vanishing_computations from memory. Cause: {e}"),
+        })?
+        .into_u256();
+
+    // mstore(add(0x20, vka_end), 1)
+    memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&U256::one().into_be_bytes32());
+
+    let mut mptr = lsb16(&vanishing_computations);
+    vanishing_computations >>= 16;
+    let mptr_end = lsb16(&vanishing_computations);
+    vanishing_computations >>= 16;
+    let mut point_mptr = lsb16(&vanishing_computations);
+    while mptr < mptr_end {
+        let idx = vka_end + mptr;
+        let val = mu - mload(memory, (point_mptr + vka_end) as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load scalar from memory during vanishing_computations. Cause: {e}"
+                ),
+            })?
+            .into_fr();
+        // mstore(add(vka_end, mptr), val);
+        memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+        mptr += 0x20;
+        point_mptr += 0x20;
+    }
+
+    vanishing_computations >>= 16;
+    let num_words = lsb8(&vanishing_computations);
+    vanishing_computations >>= 8;
+    let mut s = mload(memory, (vka_end + lsb16(&vanishing_computations)) as u32)
+                .map_err(|e| VerifyError::KeyError { message: format!("Unable to initialize s with scalar from memory during vanishing_computations. Cause: {e}") })?
+                .into_fr();
+    vanishing_computations >>= 16;
+    for _ in 0..num_words {
+        while !vanishing_computations.is_zero() {
+            s = s * mload(memory, (vka_end + lsb16(&vanishing_computations)) as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to update s during vanishing_computations. Cause: {e}"
+                    ),
+                })?
+                .into_fr();
+            vanishing_computations >>= 16;
+        }
+        pcs_ptr += 0x20;
+        vanishing_computations = mload(memory, pcs_ptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load vanishing_computations from memory. Cause: {e}"),
+            })?
+            .into_u256();
+    }
+    let mut diff_ptr = vka_end + lsb16(&vanishing_computations);
+    // mstore(diff_ptr, s)
+    memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&s.into_be_bytes32());
+
+    vanishing_computations >>= 16;
+    let mut diff: Fr;
+    let sets_len = lsb16(&vanishing_computations);
+    pcs_ptr += 0x20;
+    vanishing_computations = mload(memory, pcs_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load vanishing_computations from memory. Cause: {e}"),
+        })?
+        .into_u256();
+    for i in 0..sets_len {
+        diff = mload(memory, (lsb16(&vanishing_computations) + vka_end) as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load diff from memory. Cause: {e}"),
+            })?
+            .into_fr();
+        vanishing_computations >>= 16;
+        while !vanishing_computations.is_zero() {
+            diff = diff
+                * mload(memory, (lsb16(&vanishing_computations) + vka_end) as u32)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "Unable to read scalar from memory in order to update diff. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr();
+            vanishing_computations >>= 16;
+        }
+        diff_ptr += 0x20;
+        // mstore(diff_ptr, diff)
+        memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&diff.into_be_bytes32());
+
+        if i == 0 {
+            // mstore(vka_end, diff)
+            memory[vka_end..vka_end + 0x20].copy_from_slice(&diff.into_be_bytes32());
+        }
+        pcs_ptr += 0x20;
+        vanishing_computations = mload(memory, pcs_ptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load vanishing_computations from memory. Cause: {e}"),
+            })?
+            .into_u256();
+    }
+
+    Ok(pcs_ptr)
+}
+
+// Performs coefficient computations. Returns updated pcs_ptr.
+fn perform_coeff_computations(memory: &mut [u8], mut pcs_ptr: usize) -> Result<usize, VerifyError> {
+    let mut coeff_len_data = mload(memory, pcs_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load coeff_len_data from memory. Cause: {e}"),
+        })?
+        .into_u256();
+
+    // Load in the least significant byte of the `coeff_len_data` word to get the total number
+    // of words we will need to load in that contains the packed Vec<set.rots().len()>.
+    let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&coeff_len_data);
+
+    coeff_len_data >>= 8;
+
+    let mut i = pcs_ptr;
+    pcs_ptr = end_ptr_packed_lens;
+    while i < end_ptr_packed_lens {
+        while !coeff_len_data.is_zero() {
+            let coeff_data = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load coeff_data from memory. Cause: {e}"),
+                })?
+                .into_u256();
+            coeff_len_data = coeff_computations(memory, coeff_len_data, coeff_data);
+            pcs_ptr += 0x20;
+        }
+        coeff_len_data = mload(memory, i as u32 + 0x20)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load coeff_len_data from memory. Cause: {e}"),
+            })?
+            .into_u256();
+        i += 0x20;
+    }
+
+    Ok(pcs_ptr)
+}
+
+// Performs normalized coefficient computations.
+fn perform_normalized_coeff_computations(
+    memory: &mut [u8],
+    vka_end: usize,
+    mut pcs_ptr: usize,
+) -> Result<usize, VerifyError> {
+    let mut norm_coeff_data = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load norm_coeff_data from memory during normalized_coeff_computations. Cause: {e}"),
+                })?
+                .into_u256();
+
+    batch_invert_in_memory(
+        memory,
+        vka_end as u32,
+        (vka_end + lsb16(&norm_coeff_data)) as u32,
+    );
+
+    norm_coeff_data >>= 16;
+
+    let diff_0_inv = mload(memory, vka_end as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load diff_0_inv from memory during normalized_coeff_computations. Cause: {e}"),
+                })?
+                .into_fr();
+    let mptr0 = lsb16(&norm_coeff_data) + vka_end;
+    norm_coeff_data >>= 16;
+
+    // mstore(mptr0, diff_0_inv)
+    memory[mptr0..mptr0 + 0x20].copy_from_slice(&diff_0_inv.into_be_bytes32());
+
+    let mptr_end = mptr0 + lsb16(&norm_coeff_data);
+    for mptr in ((mptr0 + 0x20)..mptr_end).step_by(0x20) {
+        // mstore(mptr, mulmod(mload(mptr), diff_0_inv, R))
+        let val = mload(memory, mptr as u32).map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load scalar from memory during normalized_coeff_computations. Cause: {e}"),
+                })?.into_fr() * diff_0_inv;
+        memory[mptr..mptr + 0x20].copy_from_slice(&val.into_be_bytes32());
+    }
+    pcs_ptr += 0x20;
+
+    Ok(pcs_ptr)
+}
+
+// Performs r_evals_computations. Returns updated pcs_ptr.
+fn perform_r_evals_computations(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    vka_end: usize,
+    theta_mptr: usize,
+    mut pcs_ptr: usize,
+    mut coeff_ptr: usize,
+) -> Result<usize, VerifyError> {
+    let mut r_evals_meta_data = mload(memory, pcs_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load r_evals_meta_data from memory. Cause: {e}"),
+        })?
+        .into_u256();
+
+    let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&r_evals_meta_data);
+    r_evals_meta_data >>= 8;
+    let mut set_coeff = lsb16(&r_evals_meta_data) + vka_end;
+    r_evals_meta_data >>= 16;
+    let mut r_eval_mptr = lsb16(&r_evals_meta_data) + vka_end;
+    r_evals_meta_data >>= 16;
+    let mut i = pcs_ptr;
+    pcs_ptr = end_ptr_packed_lens;
+    let zeta = mload(memory, theta_mptr as u32 + 0xA0)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load zeta from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let quotient_eval = mload(memory, theta_mptr as u32 + 0x240)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load quotient_eval from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let mut not_first = false;
+    let mut r_eval: Fr;
+    while i < end_ptr_packed_lens {
+        while !r_evals_meta_data.is_zero() {
+            (r_eval, pcs_ptr) = r_evals_computation(
+                memory,
+                raw_proof,
+                lsb8(&r_evals_meta_data) as u32,
+                pcs_ptr as u32,
+                zeta,
+                quotient_eval,
+                coeff_ptr as u32,
+            )
+            .map_err(|_| VerifyError::OtherError {
+                message: "".to_string(),
+            })?; // TODO: REVISIT WHEN DOING ERROR HANDLING...
+            coeff_ptr = coeff_ptr + lsb8(&r_evals_meta_data);
+            r_evals_meta_data >>= 8;
+            if not_first {
+                r_eval *= mload(memory, set_coeff as u32)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!("Unable to load set_coeff from memory. Cause: {e}"),
+                    })?
+                    .into_fr();
+                set_coeff += 0x20;
+            }
+            not_first = true;
+            // mstore(r_eval_mptr, r_eval)
+            memory[r_eval_mptr..r_eval_mptr + 0x20].copy_from_slice(&r_eval.into_be_bytes32());
+
+            r_eval_mptr += 0x20;
+        }
+        r_evals_meta_data = mload(memory, i as u32 + 0x20)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load r_evals_meta_data from memory. Cause: {e}"),
+            })?
+            .into_u256();
+        i += 0x20;
+    }
+
+    Ok(pcs_ptr)
+}
+
+// Performs coeff_sums_computation. Returns updated pcs_ptr.
+fn perform_coeff_sums_computation(
+    memory: &mut [u8],
+    vka_end: usize,
+    mut pcs_ptr: usize,
+) -> Result<usize, VerifyError> {
+    let mut coeff_sums_data = mload(memory, pcs_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load coeff_sums_data from memory. Cause: {e}"),
+        })?
+        .into_u256();
+
+    let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&coeff_sums_data);
+    coeff_sums_data >>= 8;
+    let mut coeff_ptr = vka_end + 0x20;
+
+    let mut i = pcs_ptr;
+    pcs_ptr = end_ptr_packed_lens;
+    while i < end_ptr_packed_lens {
+        while !coeff_sums_data.is_zero() {
+            let mut sum = mload(memory, coeff_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load initial value for sum from memory. Cause: {e}"
+                    ),
+                })?
+                .into_fr();
+            let len = lsb8(&coeff_sums_data);
+            coeff_sums_data >>= 8;
+            for j in (0x20..len).step_by(0x20) {
+                sum += mload(memory, (coeff_ptr + j) as u32)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "Unable to update sum during coeff_sums_computation. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr(); // TODO: DOUBLE-CHECK: (coeff_ptr + j) as u32 fits into a `u32`
+            }
+            coeff_ptr += len;
+            let idx = lsb16(&coeff_sums_data) + vka_end;
+            // mstore(idx, sum)
+            memory[idx..idx + 0x20].copy_from_slice(&sum.into_be_bytes32());
+
+            coeff_sums_data >>= 16;
+        }
+        coeff_sums_data = mload(memory, i as u32 + 0x20)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load coeff_sums_data from memory. Cause: {e}"),
+            })?
+            .into_u256();
+        i += 0x20;
+    }
+
+    Ok(pcs_ptr)
+}
+
+// Performs r_eval_computation. Returns updated value of pcs_ptr.
+fn perform_r_eval_computation(
+    memory: &mut [u8],
+    vka_end: usize,
+    theta_mptr: usize,
+    mut pcs_ptr: usize,
+) -> Result<usize, VerifyError> {
+    let mut r_eval_data = mload(memory, pcs_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load r_eval_data from memory. Cause: {e}"),
+        })?
+        .into_u256();
+
+    let mptr_end = lsb16(&r_eval_data) + vka_end;
+
+    let mut mptr = vka_end;
+    r_eval_data >>= 16;
+    let mut sum_mptr = lsb16(&r_eval_data) + vka_end;
+    while mptr < mptr_end {
+        // mstore(mptr, mload(sum_mptr))
+        let bytes = mload(memory, sum_mptr as u32).map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "Unable to load scalar from memory during r_eval_computation. Cause: {e}"
+            ),
+        })?;
+        memory[mptr..mptr + 0x20].copy_from_slice(&bytes);
+
+        mptr += 0x20;
+        sum_mptr += 0x20;
+    }
+    r_eval_data >>= 16;
+
+    batch_invert_in_memory(memory, vka_end as u32, mptr_end as u32);
+
+    let r_eval_ptr = lsb16(&r_eval_data) + vka_end;
+    let mut r_eval = mload(memory, mptr_end as u32 - 0x20)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to initialize r_eval. Cause: {e}"),
+        })?
+        .into_fr()
+        * mload(memory, r_eval_ptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to initialize r_eval. Cause: {e}"),
+            })?
+            .into_fr();
+    r_eval_data >>= 16;
+
+    let mut sum_inv_mptr = mptr_end - 0x40;
+    let sum_inv_mptr_end = vka_end - 0x20;
+    let mut r_eval_mptr = r_eval_ptr - 0x20;
+
+    while sum_inv_mptr > sum_inv_mptr_end {
+        r_eval *= mload(memory, theta_mptr as u32 + 0xc0)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to update r_eval during r_eval computation. Cause: {e}"),
+            })?
+            .into_fr();
+        r_eval += mload(memory, sum_inv_mptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to update r_eval during r_eval computation. Cause: {e}"),
+            })?
+            .into_fr()
+            * mload(memory, r_eval_mptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to update r_eval during r_eval computation. Cause: {e}"
+                    ),
+                })?
+                .into_fr();
+
+        sum_inv_mptr -= 0x20;
+        r_eval_mptr -= 0x20;
+    }
+    // mstore(add(theta_mptr, 0x2A0), r_eval)
+    let idx = theta_mptr + 0x2a0;
+    memory[idx..idx + 0x20].copy_from_slice(&r_eval.into_be_bytes32());
+
+    pcs_ptr += 0x20;
+
+    Ok(pcs_ptr)
 }
 
 #[cfg(test)]
