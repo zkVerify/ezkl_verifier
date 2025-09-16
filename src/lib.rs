@@ -3,7 +3,7 @@
 
 mod constants;
 mod errors;
-mod proof;
+// mod proof;
 mod types;
 mod utils;
 // mod vk;
@@ -20,7 +20,7 @@ use core::ops::BitAnd;
 use sha3::{Digest, Keccak256};
 
 use crate::{
-    constants::{BYTE_FLAG_BITMASK, DELTA, MAX_U32, PTR_BITMASK},
+    constants::{BYTE_FLAG_BITMASK, DELTA, PTR_BITMASK},
     errors::VerifyError,
     utils::{
         IntoBEBytes32, IntoFr, IntoU256, load_from_proof, lsb8, lsb16, lsb32, mload, mload_u32,
@@ -105,23 +105,34 @@ fn verify_proof_inner<H: CurveHooks>(
 
         // let proof_cptr := proof.offset
         let mut challenge_mptr = vka_end
-            + u32_from_be_tail(&mload(&memory, (VKA_OFFSET + 0xc0) as u32).unwrap()) as usize;
+            + mload_u32(memory, (VKA_OFFSET + 0xc0) as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to parse fsm as u32. Cause: {}", e).to_string(),
+            })? as usize;
         // Set the theta_mptr (vk_mptr + vk_len + challenges_length)
         theta_mptr = challenge_mptr
-            + u32_from_be_tail(&mload(&memory, (VKA_OFFSET + 0x0120) as u32).unwrap()) as usize;
+            + mload_u32(memory, (VKA_OFFSET + 0x0120) as u32).map_err(|e| {
+                VerifyError::KeyError {
+                    message: format!("Unable to compute theta_mptr as u32. Cause: {}", e)
+                        .to_string(),
+                }
+            })? as usize;
 
         let mut challenge_len_ptr = VKA_OFFSET + MEMORY_OFFSET + 0x420;
         let mut challenge_len_data = mload(&memory, challenge_len_ptr as u32)
-            .unwrap()
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to read challenge_len_data. Cause: {e}"),
+            })?
             .into_u256();
         let num_words = lsb8(&challenge_len_data);
 
         challenge_len_data >>= 8;
         // num_evals is defined as u64 in order to be able to fit all possible u32 values
         let num_evals = u64::from(
-            0x20 * u32_from_be_tail(
-                &mload(&memory, 0x60 + (VKA_OFFSET + MEMORY_OFFSET) as u32).unwrap(),
-            ),
+            0x20 * mload_u32(memory, 0x60 + (VKA_OFFSET + MEMORY_OFFSET) as u32).map_err(|e| {
+                VerifyError::KeyError {
+                    message: format!("Unable to read num_evals as u32. Cause: {}", e).to_string(),
+                }
+            })?,
         );
 
         for instance in pubs {
@@ -180,26 +191,27 @@ fn verify_proof_inner<H: CurveHooks>(
                         }
                         Err(_) => {
                             return Err(VerifyError::OtherError {
-                                message: "Failed to subsequent squeeze challenge.".to_string(),
+                                message: "Failed to squeeze subsequent challenge.".to_string(),
                             }); // TODO: Rework to use better error propagation
                         }
                     };
                 }
             }
             challenge_len_data = mload(&memory, challenge_len_ptr as u32)
-                .unwrap()
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to read challenge_len_data from memory. Cause: {e}"),
+                })?
                 .into_u256();
         }
 
-        // Read evaluationsrror
+        // Read evaluations
         let proof_cptr_end = proof_cptr + num_evals as usize; // num_evals
         while proof_cptr < proof_cptr_end {
-            let start = proof_cptr - PROOF_OFFSET;
-            let eval: EVMWord = raw_proof
-                .get(start..start + 32)
-                .and_then(|s| s.try_into().ok())
-                .ok_or(())
-                .unwrap(); // TODO: Replace unwrap()
+            let eval: EVMWord = load_from_proof(raw_proof, proof_cptr as u32).map_err(|e| {
+                VerifyError::InvalidProofError {
+                    message: format!("Unable to read evaluation from proof. Cause: {e}"),
+                }
+            })?;
             if eval.into_u256() >= Fr::MODULUS {
                 return Err(VerifyError::InvalidProofError {
                     message: format!("Evaluation {} exceeds field modulus.", to_hex_string(&eval)),
@@ -213,6 +225,7 @@ fn verify_proof_inner<H: CurveHooks>(
 
         // Read batch opening proof and generate challenges
         // Bdfg21
+
         // zeta
         match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
             Ok((new_challenge_mptr, new_hash_mptr)) => {
@@ -222,7 +235,7 @@ fn verify_proof_inner<H: CurveHooks>(
             Err(_) => {
                 return Err(VerifyError::OtherError {
                     message: "Failed to squeeze challenge.".to_string(),
-                }); // TODO: Rework to use better error propagation
+                });
             }
         };
         // nu
@@ -233,7 +246,7 @@ fn verify_proof_inner<H: CurveHooks>(
             Err(_) => {
                 return Err(VerifyError::OtherError {
                     message: "Failed to squeeze subsequent challenge.".to_string(),
-                }); // TODO: Rework to use better error propagation
+                });
             }
         };
 
@@ -244,7 +257,7 @@ fn verify_proof_inner<H: CurveHooks>(
                 hash_mptr = new_hash_mptr;
             }
             Err(e) => {
-                return Err(e); // TODO: Rework to use better error propagation
+                return Err(e);
             }
         };
 
@@ -257,7 +270,7 @@ fn verify_proof_inner<H: CurveHooks>(
             Err(_) => {
                 return Err(VerifyError::OtherError {
                     message: "Failed to squeeze challenge.".to_string(),
-                }); // TODO: Rework to use better error propagation
+                });
             }
         };
 
@@ -268,7 +281,7 @@ fn verify_proof_inner<H: CurveHooks>(
                 hash_mptr = new_hash_mptr;
             }
             Err(e) => {
-                return Err(e); // TODO: Rework to use better error propagation
+                return Err(e);
             }
         };
 
@@ -315,14 +328,16 @@ fn verify_proof_inner<H: CurveHooks>(
     // Compute Lagrange evaluations and instance evaluation
     {
         // Calculate vanishing polynomial numerator
-        let k = u32_from_be_tail(
-            &mload(&memory, (VKA_OFFSET + 0x00a0 + MEMORY_OFFSET) as u32).unwrap(),
-        );
+        let k = mload_u32(memory, (VKA_OFFSET + 0x00a0 + MEMORY_OFFSET) as u32).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!("Unable to parse k from the VKA as an u32. Cause: {e}"),
+            }
+        })?;
 
         let x = mload(memory, theta_mptr as u32 + 0x80)
-            .map_err(|_| VerifyError::KeyError {
+            .map_err(|e| VerifyError::KeyError {
                 message: format!(
-                    "Failed reading x from memory at address 0x{:x?}",
+                    "Failed reading x from memory at address 0x{:x?}. Cause: {e}",
                     theta_mptr as u32 + 0x80
                 ),
             })?
@@ -335,9 +350,9 @@ fn verify_proof_inner<H: CurveHooks>(
 
         // Prepare denominators for Lagrange evaluation
         let omega = mload(memory, (VKA_OFFSET + 0x00e0 + MEMORY_OFFSET) as u32)
-            .map_err(|_| VerifyError::KeyError {
+            .map_err(|e| VerifyError::KeyError {
                 message: format!(
-                    "Failed reading omega from memory at address 0x{:x?}",
+                    "Failed reading omega from memory at address 0x{:x?}. Cause: {e}",
                     (VKA_OFFSET + 0x00e0 + MEMORY_OFFSET) as u32
                 ),
             })?
@@ -346,38 +361,13 @@ fn verify_proof_inner<H: CurveHooks>(
         let x_n_mptr = theta_mptr + 0x180;
         let mut mptr = x_n_mptr;
 
-        let num_instances = {
-            let num_instances_bytes = &mload(memory, 0xe0).map_err(|_| VerifyError::KeyError {
-                message: format!(
-                    "Failed reading num_instances from memory at address 0x{:x?}",
-                    0xe0
-                ),
-            })?;
-            // validation
-            if num_instances_bytes.into_u256() > MAX_U32 {
-                return Err(VerifyError::KeyError {
-                    message: "num_instances_bytes in VKA exceeds u32::MAX".to_string(),
-                });
-            }
-            u32_from_be_tail(&num_instances_bytes)
-        };
+        let num_instances = mload_u32(memory, 0xe0).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to parse num_instances from VKA as an u32. Cause: {e}"),
+        })?;
 
-        let num_neg_lagranges = {
-            let num_neg_lagranges_bytes =
-                &mload(memory, 0x0480).map_err(|_| VerifyError::KeyError {
-                    message: format!(
-                        "Failed reading num_neg_lagranges from memory at address 0x{:x?}",
-                        0x0480
-                    ),
-                })?;
-            // validation
-            if num_neg_lagranges_bytes.into_u256() > MAX_U32 {
-                return Err(VerifyError::KeyError {
-                    message: "num_neg_lagranges in VKA exceeds u32::MAX".to_string(),
-                });
-            }
-            u32_from_be_tail(&num_neg_lagranges_bytes)
-        };
+        let num_neg_lagranges = mload_u32(memory, 0x0480).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to parse num_neg_lagranges from VKA as an u32. Cause: {e}"),
+        })?;
 
         let mut mptr_end = mptr + 32 * (num_instances + num_neg_lagranges) as usize;
         if num_instances == 0 {
@@ -385,11 +375,8 @@ fn verify_proof_inner<H: CurveHooks>(
         }
 
         let mut pow_of_omega = mload(memory, (VKA_OFFSET + 0x0120 + MEMORY_OFFSET) as u32)
-            .map_err(|_| VerifyError::KeyError {
-                message: format!(
-                    "Failed reading omega_inv_to_l from memory at address 0x{:x?}",
-                    (VKA_OFFSET + 0x0120 + MEMORY_OFFSET) as u32
-                ),
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Failed reading omega_inv_to_l from memory. Cause: {e}"),
             })?
             .into_fr();
 
@@ -408,36 +395,78 @@ fn verify_proof_inner<H: CurveHooks>(
 
         batch_invert_in_memory(memory, x_n_mptr as u32, mptr_end as u32 + 0x20);
 
-        let l_i_common = x_n_minus_1 * mload(memory, 0x0160).unwrap().into_fr();
-        let mut pow_of_omega = mload(memory, 0x01c0).unwrap().into_fr();
+        let l_i_common = x_n_minus_1
+            * mload(memory, 0x0160)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to compute l_i_common. Cause: {e}"),
+                })?
+                .into_fr();
+        let mut pow_of_omega = mload(memory, 0x01c0)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to read pow_of_omega from VKA. Cause: {e}"),
+            })?
+            .into_fr();
         for mptr in (x_n_mptr..mptr_end).step_by(0x20) {
             // mstore(mptr, mulmod(l_i_common, mulmod(mload(mptr), pow_of_omega,R),R))
-            let zeta_minus_omega_i_inv = mload(memory, mptr as u32).unwrap().into_fr();
+            let zeta_minus_omega_i_inv = mload(memory, mptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to read zeta_minus_omega_i_inv from memory. Cause: {e}"
+                    ),
+                })?
+                .into_fr();
             memory[mptr..mptr + 0x20].copy_from_slice(
                 &(l_i_common * zeta_minus_omega_i_inv * pow_of_omega).into_be_bytes32(),
             );
             pow_of_omega *= omega;
         }
 
-        let mut l_blind = mload(memory, x_n_mptr as u32 + 0x20).unwrap().into_fr();
+        let mut l_blind = mload(memory, x_n_mptr as u32 + 0x20)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to initialize l_blind from memory. Cause: {e}"),
+            })?
+            .into_fr();
         let l_i_cptr_end = x_n_mptr + 0x20 * num_neg_lagranges as usize;
         let mut l_i_cptr = x_n_mptr + 0x40;
 
         while l_i_cptr < l_i_cptr_end {
-            l_blind += mload(memory, l_i_cptr as u32).unwrap().into_fr();
+            l_blind += mload(memory, l_i_cptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Failed to read from memory while updating l_blind. Cause: {e}"
+                    ),
+                })?
+                .into_fr();
             l_i_cptr += 0x20;
         }
 
         let mut instance_eval = Fr::ZERO;
         for instance in pubs {
-            instance_eval += mload(memory, l_i_cptr as u32).unwrap().into_fr() * instance.into_fr();
+            instance_eval += mload(memory, l_i_cptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Failed to read from memory while updating instance_eval. Cause: {e}"
+                    ),
+                })?
+                .into_fr()
+                * instance.into_fr();
             l_i_cptr += 0x20;
         }
 
-        let x_n_minus_1_inv = mload(memory, mptr_end as u32).unwrap().into_fr();
-        let l_last = mload(memory, x_n_mptr as u32).unwrap().into_fr();
+        let x_n_minus_1_inv = mload(memory, mptr_end as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to read x_n_minus_1_inv from memory. Cause: {e}"),
+            })?
+            .into_fr();
+        let l_last = mload(memory, x_n_mptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to read l_last from memory. Cause: {e}"),
+            })?
+            .into_fr();
         let l_0 = mload(memory, x_n_mptr as u32 + 0x20 * num_neg_lagranges)
-            .unwrap()
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to read l_0 from memory. Cause: {e}"),
+            })?
             .into_fr();
 
         // mstore(x_n_mptr, x_n)
@@ -462,15 +491,27 @@ fn verify_proof_inner<H: CurveHooks>(
     // Compute quotient evaluation
     {
         let mut quotient_eval_numer = Fr::ONE;
-        let y = mload(memory, theta_mptr as u32 + 0x60).unwrap().into_fr();
+        let y = mload(memory, theta_mptr as u32 + 0x60)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to read y from memory. Cause: {e}"),
+            })?
+            .into_fr();
 
         {
             // Gate computations/expression evaluations.
             let gate_computations_len_offset = VKA_OFFSET + 0x0340 + MEMORY_OFFSET;
             let (mut computations_ptr, computations_len) =
-                soa_layout_metadata(memory, gate_computations_len_offset);
+                soa_layout_metadata(memory, gate_computations_len_offset).map_err(|e| {
+                    VerifyError::KeyError {
+                        message: format!("{e}"),
+                    }
+                })?;
 
-            let mut expressions_word = mload(memory, computations_ptr as u32).unwrap().into_u256();
+            let mut expressions_word = mload(memory, computations_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Failed to read expressions_word from memory. Cause: {e}"),
+                })?
+                .into_u256();
             let mut last_idx: usize;
 
             // Load in the total number of code blocks from the vk constants, right after the number of= challenges
@@ -485,14 +526,17 @@ fn verify_proof_inner<H: CurveHooks>(
                     computations_ptr,
                     &mut expressions_word,
                 )
-                .unwrap();
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("expression_evals_packed failed. Cause: {e:?}"),
+                })?;
                 match po {
                     ProcessOutput::Index(ind) => {
                         last_idx = ind;
                     }
                     _ => {
                         return Err(VerifyError::OtherError {
-                            message: "".to_string(),
+                            message: "po should always be an Index variant at this point"
+                                .to_string(),
                         });
                     }
                 }
@@ -502,14 +546,22 @@ fn verify_proof_inner<H: CurveHooks>(
                 match code_block {
                     0 => {
                         quotient_eval_numer = mload(memory, (vka_end + last_idx) as u32)
-                            .unwrap()
+                            .map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "Unable to read quotient_eval_numer from memory. Cause: {e:?}"
+                                ),
+                            })?
                             .into_fr()
                     }
                     1 => {
                         // Otherwise we add the last var in the code block to `quotient_eval_numer` mod r
                         quotient_eval_numer = quotient_eval_numer * y
                             + mload(memory, (vka_end + last_idx) as u32)
-                                .unwrap()
+                                .map_err(|e| VerifyError::KeyError {
+                                    message: format!(
+                                        "Failed to compute quotient_eval_numer. Cause: {e:?}"
+                                    ),
+                                })?
                                 .into_fr();
                     }
                     _ => {
@@ -523,11 +575,21 @@ fn verify_proof_inner<H: CurveHooks>(
         }
         {
             // Permutation computations
-            let mut permutation_z_evals_ptr = u32_from_be_tail(
-                &mload(memory, 0x0360 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32).unwrap(),
-            );
-            let mut permutation_z_evals =
-                mload(memory, permutation_z_evals_ptr).unwrap().into_u256(); // TODO: REVISIT TYPE!!!
+            let mut permutation_z_evals_ptr = mload_u32(
+                memory,
+                0x0360 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32,
+            )
+            .map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to read permutation_computations_len_offset as an u32. Cause: {e}"
+                ),
+            })?;
+
+            let mut permutation_z_evals = mload(memory, permutation_z_evals_ptr)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to read permutation_z_evals from memory. Cause: {e}"),
+                })?
+                .into_u256();
             // Last idx of permutation evals == permutation_evals.len() - 1
             let last_idx = lsb8(&permutation_z_evals);
 
@@ -538,13 +600,28 @@ fn verify_proof_inner<H: CurveHooks>(
             let num_words = lsb32(&permutation_z_evals);
             permutation_z_evals >>= 32;
             permutation_z_evals_ptr += 0x20;
-            permutation_z_evals = mload(memory, permutation_z_evals_ptr).unwrap().into_u256();
-            let l_0 = mload(memory, theta_mptr as u32 + 0x200).unwrap().into_fr();
+            permutation_z_evals = mload(memory, permutation_z_evals_ptr)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to read permutation_z_evals from memory. Cause: {e}"),
+                })?
+                .into_u256();
+            let l_0 = mload(memory, theta_mptr as u32 + 0x200)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to read l_0 from memory. Cause: {e}"),
+                })?
+                .into_fr();
 
             {
                 // Get the first and second LSG bytes from the first permutation_z_evals word to load in (z, _, _)
                 let idx = lsb16(&permutation_z_evals) as u32;
-                let eval = l_0 - l_0 * load_from_proof(raw_proof, idx).unwrap().into_fr();
+                let eval = l_0
+                    - l_0 * load_from_proof(raw_proof, idx)
+                        .map_err(|e| VerifyError::InvalidProofError {
+                            message: format!(
+                                "Unable to update eval during permutation computations. Cause: {e}"
+                            ),
+                        })?
+                        .into_fr();
                 quotient_eval_numer = quotient_eval_numer * y + eval;
             }
 
@@ -553,18 +630,39 @@ fn verify_proof_inner<H: CurveHooks>(
                 let perm_z_last_ptr = last_idx * (num_words & PTR_BITMASK as usize)
                     + permutation_z_evals_ptr as usize;
 
-                let idx = lsb16(&mload(memory, perm_z_last_ptr as u32).unwrap().into_u256()) as u32;
-                // let slice = raw_proof.get(idx..idx + 0x20).unwrap();
-                // let eval_bytes: [u8; 32] = slice.try_into().unwrap();
-                // let perm_z_last = eval_bytes.into_fr(); // calldataload(lsb16(&mload(memory, perm_z_last_ptr as u32).unwrap().into_u256()));
-                let perm_z_last = load_from_proof(raw_proof, idx).unwrap().into_fr();
+                let idx = lsb16(
+                    &mload(memory, perm_z_last_ptr as u32)
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!(
+                                "Unable to read perm_z_last's address from memory. Cause: {e}"
+                            ),
+                        })?
+                        .into_u256(),
+                ) as u32;
+                let perm_z_last = load_from_proof(raw_proof, idx)
+                    .map_err(|e| VerifyError::InvalidProofError {
+                        message: format!("Unable to load perm_z_last from proof. Cause: {e}"),
+                    })?
+                    .into_fr();
 
                 quotient_eval_numer = quotient_eval_numer * y
-                    + mload(memory, theta_mptr as u32 + 0x1C0).unwrap().into_fr()
+                    + mload(memory, theta_mptr as u32 + 0x1C0).map_err(|e| VerifyError::KeyError {
+                            message: format!(
+                                "Unable to update quotient_eval_numer during permutation computations. Cause: {e}"
+                            ),
+                        })?.into_fr()
                         * (perm_z_last * perm_z_last - perm_z_last);
 
-                let lhs = mload(memory, theta_mptr as u32 + 0x20).unwrap().into_fr();
-                let rhs = mload(memory, theta_mptr as u32 + 0x80).unwrap().into_fr();
+                let lhs = mload(memory, theta_mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError {
+                            message: format!(
+                                "Unable to load lhs when loading in the last permutation_z_evals word. Cause: {e}"
+                            ),
+                        })?.into_fr();
+                let rhs = mload(memory, theta_mptr as u32 + 0x80).map_err(|e| VerifyError::KeyError {
+                            message: format!(
+                                "Unable to load rhs when loading in the last permutation_z_evals word. Cause: {e}"
+                            ),
+                        })?.into_fr();
                 memory[vka_end..vka_end + 0x20].copy_from_slice(&(lhs * rhs).into_be_bytes32());
 
                 quotient_eval_numer = z_evals(
@@ -584,22 +682,39 @@ fn verify_proof_inner<H: CurveHooks>(
         {
             // lookup computations
             // mstore(vka_end, mload(add(theta_mptr, 0x1C0)))
-            let value = &mload(&memory, theta_mptr as u32 + 0x1c0).unwrap();
+            let value =
+                &mload(&memory, theta_mptr as u32 + 0x1c0).map_err(|e| VerifyError::KeyError {
+                    message: format!("Failed to read l_last from memory. Cause: {e}"),
+                })?;
             memory[vka_end..vka_end + 0x20].copy_from_slice(value); // l_last
             // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x200)))
-            let value = &mload(memory, theta_mptr as u32 + 0x200).unwrap();
+            let value =
+                &mload(memory, theta_mptr as u32 + 0x200).map_err(|e| VerifyError::KeyError {
+                    message: format!("Failed to read l_0 from memory. Cause: {e}"),
+                })?;
             memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(value); // l_0
             // mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x1E0)))
-            let value = &mload(memory, 0x1e0).unwrap();
+            let value = &mload(memory, 0x1e0).map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to read l_blind from memory. Cause: {e}"),
+            })?;
             memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(value); // l_blind
             // mstore(add(0x60, vka_end), mload(theta_mptr))
-            let value = &mload(memory, theta_mptr as u32).unwrap();
+            let value = &mload(memory, theta_mptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to read theta from memory. Cause: {e}"),
+            })?;
             memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(value); // theta
             // mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x20)))
-            let value = &mload(memory, theta_mptr as u32 + 0x20).unwrap();
+            let value =
+                &mload(memory, theta_mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError {
+                    message: format!("Failed to read beta from memory. Cause: {e}"),
+                })?;
             memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(value); // beta
             let (mut evals_ptr, meta_data) =
-                soa_layout_metadata(memory, 0x380 + VKA_OFFSET + MEMORY_OFFSET);
+                soa_layout_metadata(memory, 0x380 + VKA_OFFSET + MEMORY_OFFSET).map_err(|e| {
+                    VerifyError::KeyError {
+                        message: format!("{e}"),
+                    }
+                })?;
 
             // lookup meta data contains 32 byte flags for indicating if we need to do a lookup table lines
             // expression evaluation or we can use the previous one cached in the table var.
@@ -659,26 +774,45 @@ fn verify_proof_inner<H: CurveHooks>(
         let last_quotient_x_cptr = 0x0300 + VKA_OFFSET + MEMORY_OFFSET;
         let bytes = load_from_proof(
             raw_proof,
-            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap()),
+            mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load pointer at last_quotient_x_cptr from memory. Cause: {e}"
+                ),
+            })?,
         )
-        .unwrap();
+        .map_err(|e| VerifyError::InvalidProofError {
+            message: format!("Unable to load last_quotient_x from proof. Cause: {e}"),
+        })?;
         // mstore(vka_end, calldataload(mload(0x03a0)))
         memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
 
         // mstore(add(0x20, vka_end), calldataload(add(mload(0x03a0), 0x20)))
         let bytes = load_from_proof(
             raw_proof,
-            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap()) + 0x20,
+            mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load pointer at last_quotient_x_cptr from memory. Cause: {e}"
+                ),
+            })? + 0x20,
         )
-        .unwrap();
+        .map_err(|e| VerifyError::InvalidProofError {
+            message: format!("Unable to load last_quotient_y from proof. Cause: {e}"),
+        })?;
         memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
 
-        let x_n = mload(memory, theta_mptr as u32 + 0x180).unwrap().into_fr();
+        let x_n = mload(memory, theta_mptr as u32 + 0x180)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to read x_n from memory. Cause: {e}"),
+            })?
+            .into_fr();
 
         let mut cptr =
-            u32_from_be_tail(&mload(memory, last_quotient_x_cptr as u32).unwrap()) - 0x40;
-        let cptr_end =
-            u32_from_be_tail(&mload(memory, first_quotient_x_cptr as u32).unwrap()) - 0x40;
+            mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to initialize cptr during quotient commitment computation phase. Cause: {e}"),
+            })? - 0x40;
+        let cptr_end =  mload_u32(memory, first_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to initialize cptr_end during quotient commitment computation phase. Cause: {e}"),
+            })? - 0x40;
         while cptr_end < cptr {
             ec_mul_acc::<H>(memory, &x_n).map_err(|_| VerifyError::OtherError {
                 message: "".to_string(),
@@ -703,14 +837,31 @@ fn verify_proof_inner<H: CurveHooks>(
     // Compute pairing lhs and rhs
     {
         // point_computations
-        let mut pcs_ptr = u32_from_be_tail(
-            &mload(memory, 0x03a0 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32).unwrap(),
-        ) as usize; // 0x0440
+        let mut pcs_ptr = mload_u32(memory, 0x03a0 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to read pcs_ptr from memory. Cause: {e}"),
+            })? as usize;
         {
-            let mut point_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
-            let x = mload(memory, theta_mptr as u32 + 0x80).unwrap().into_fr(); // Is this a point or a scalar?
-            let omega = mload(memory, 0x0180).unwrap().into_fr();
-            let omega_inv = mload(memory, 0x01a0).unwrap().into_fr();
+            let mut point_computations = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load point_computations from memory. Cause: {e}"),
+                })?
+                .into_u256();
+            let x = mload(memory, theta_mptr as u32 + 0x80)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load x from memory. Cause: {e}"),
+                })?
+                .into_fr(); // Is this a point or a scalar?
+            let omega = mload(memory, 0x0180)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load omega from memory. Cause: {e}"),
+                })?
+                .into_fr();
+            let omega_inv = mload(memory, 0x01a0)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load omega_inv from memory. Cause: {e}"),
+                })?
+                .into_fr();
             let mut x_pow_of_omega = x * omega;
             (x_pow_of_omega, pcs_ptr) = point_rots(
                 memory,
@@ -723,7 +874,11 @@ fn verify_proof_inner<H: CurveHooks>(
             )
             .unwrap();
             pcs_ptr += 0x20;
-            point_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            point_computations = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load point_computations from memory. Cause: {e}"),
+                })?
+                .into_u256();
             // Store interm point
             // mstore(add(and(point_computations, PTR_BITMASK), vka_end), x)
             let idx = vka_end + lsb16(&point_computations);
@@ -745,9 +900,19 @@ fn verify_proof_inner<H: CurveHooks>(
 
         // vanishing_computations
         {
-            let mu = mload(memory, theta_mptr as u32 + 0xE0).unwrap().into_fr();
+            let mu = mload(memory, theta_mptr as u32 + 0xE0)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load mu from memory. Cause: {e}"),
+                })?
+                .into_fr();
 
-            let mut vanishing_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let mut vanishing_computations = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load vanishing_computations from memory. Cause: {e}"
+                    ),
+                })?
+                .into_u256();
 
             // mstore(add(0x20, vka_end), 1)
             memory[(vka_end + 0x20)..(vka_end + 0x40)]
@@ -798,14 +963,20 @@ fn verify_proof_inner<H: CurveHooks>(
             let mut diff: Fr;
             let sets_len = lsb16(&vanishing_computations);
             pcs_ptr += 0x20;
-            vanishing_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
-            // for { let i := 0 } lt(i, sets_len) { i := add(i, 1) } {
+            vanishing_computations = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load vanishing_computations from memory. Cause: {e}"
+                    ),
+                })?
+                .into_u256();
             for i in 0..sets_len {
                 diff = mload(memory, (lsb16(&vanishing_computations) + vka_end) as u32)
-                    .unwrap()
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!("Unable to load diff from memory. Cause: {e}"),
+                    })?
                     .into_fr();
                 vanishing_computations >>= 16;
-                // for { } vanishing_computations { } {
                 while !vanishing_computations.is_zero() {
                     diff = diff
                         * mload(memory, (lsb16(&vanishing_computations) + vka_end) as u32)
@@ -822,12 +993,22 @@ fn verify_proof_inner<H: CurveHooks>(
                     memory[vka_end..vka_end + 0x20].copy_from_slice(&diff.into_be_bytes32());
                 }
                 pcs_ptr += 0x20;
-                vanishing_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+                vanishing_computations = mload(memory, pcs_ptr as u32)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "Unable to load vanishing_computations from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_u256();
             }
         }
         // coeff_computations
         {
-            let mut coeff_len_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let mut coeff_len_data = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load coeff_len_data from memory. Cause: {e}"),
+                })?
+                .into_u256();
 
             // Load in the least significant byte of the `coeff_len_data` word to get the total number
             // of words we will need to load in that contains the packed Vec<set.rots().len()>.
@@ -837,21 +1018,31 @@ fn verify_proof_inner<H: CurveHooks>(
 
             let mut i = pcs_ptr;
             pcs_ptr = end_ptr_packed_lens;
-            // for {  } lt(i, end_ptr_packed_lens) { i := add(i, 0x20) } {
             while i < end_ptr_packed_lens {
-                // for {  } coeff_len_data { } {
                 while !coeff_len_data.is_zero() {
-                    let coeff_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+                    let coeff_data = mload(memory, pcs_ptr as u32)
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!("Unable to load coeff_data from memory. Cause: {e}"),
+                        })?
+                        .into_u256();
                     coeff_len_data = coeff_computations(memory, coeff_len_data, coeff_data);
                     pcs_ptr += 0x20;
                 }
-                coeff_len_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+                coeff_len_data = mload(memory, i as u32 + 0x20)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!("Unable to load coeff_len_data from memory. Cause: {e}"),
+                    })?
+                    .into_u256();
                 i += 0x20;
             }
         }
         // normalized_coeff_computations
         {
-            let mut norm_coeff_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let mut norm_coeff_data = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load norm_coeff_data from memory. Cause: {e}"),
+                })?
+                .into_u256();
 
             batch_invert_in_memory(
                 memory,
@@ -861,7 +1052,11 @@ fn verify_proof_inner<H: CurveHooks>(
 
             norm_coeff_data >>= 16;
 
-            let diff_0_inv = mload(memory, vka_end as u32).unwrap().into_fr();
+            let diff_0_inv = mload(memory, vka_end as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load diff_0_inv from memory. Cause: {e}"),
+                })?
+                .into_fr();
             let mptr0 = lsb16(&norm_coeff_data) + vka_end;
             norm_coeff_data >>= 16;
 
@@ -880,7 +1075,11 @@ fn verify_proof_inner<H: CurveHooks>(
 
         // r_evals_computations
         {
-            let mut r_evals_meta_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let mut r_evals_meta_data = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load r_evals_meta_data from memory. Cause: {e}"),
+                })?
+                .into_u256();
 
             let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&r_evals_meta_data);
             r_evals_meta_data >>= 8;
@@ -890,9 +1089,17 @@ fn verify_proof_inner<H: CurveHooks>(
             r_evals_meta_data >>= 16;
             let mut i = pcs_ptr;
             pcs_ptr = end_ptr_packed_lens;
-            let zeta = mload(memory, theta_mptr as u32 + 0xA0).unwrap().into_fr();
-            let quotient_eval = mload(memory, theta_mptr as u32 + 0x240).unwrap().into_fr();
-            let mut not_first = false; // TODO: DOUBLE-CHECK INITIALIZATION IN CASE RESULTS ARE INCORRECT...
+            let zeta = mload(memory, theta_mptr as u32 + 0xA0)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load zeta from memory. Cause: {e}"),
+                })?
+                .into_fr();
+            let quotient_eval = mload(memory, theta_mptr as u32 + 0x240)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load quotient_eval from memory. Cause: {e}"),
+                })?
+                .into_fr();
+            let mut not_first = false;
             let mut r_eval: Fr;
             while i < end_ptr_packed_lens {
                 while !r_evals_meta_data.is_zero() {
@@ -911,7 +1118,13 @@ fn verify_proof_inner<H: CurveHooks>(
                     coeff_ptr = coeff_ptr + lsb8(&r_evals_meta_data);
                     r_evals_meta_data >>= 8;
                     if not_first {
-                        r_eval *= mload(memory, set_coeff as u32).unwrap().into_fr();
+                        r_eval *= mload(memory, set_coeff as u32)
+                            .map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "Unable to load set_coeff from memory. Cause: {e}"
+                                ),
+                            })?
+                            .into_fr();
                         set_coeff += 0x20;
                     }
                     not_first = true;
@@ -921,13 +1134,23 @@ fn verify_proof_inner<H: CurveHooks>(
 
                     r_eval_mptr += 0x20;
                 }
-                r_evals_meta_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+                r_evals_meta_data = mload(memory, i as u32 + 0x20)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "Unable to load r_evals_meta_data from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_u256();
                 i += 0x20;
             }
         }
         // coeff_sums_computation
         {
-            let mut coeff_sums_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let mut coeff_sums_data = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load coeff_sums_data from memory. Cause: {e}"),
+                })?
+                .into_u256();
 
             let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&coeff_sums_data);
             coeff_sums_data >>= 8;
@@ -937,7 +1160,11 @@ fn verify_proof_inner<H: CurveHooks>(
             pcs_ptr = end_ptr_packed_lens;
             while i < end_ptr_packed_lens {
                 while !coeff_sums_data.is_zero() {
-                    let mut sum = mload(memory, coeff_ptr as u32).unwrap().into_fr();
+                    let mut sum = mload(memory, coeff_ptr as u32)
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!("Unable to load sum from memory. Cause: {e}"),
+                        })?
+                        .into_fr();
                     let len = lsb8(&coeff_sums_data);
                     coeff_sums_data >>= 8;
                     for j in (0x20..len).step_by(0x20) {
@@ -950,13 +1177,21 @@ fn verify_proof_inner<H: CurveHooks>(
 
                     coeff_sums_data >>= 16;
                 }
-                coeff_sums_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+                coeff_sums_data = mload(memory, i as u32 + 0x20)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!("Unable to load coeff_sums_data from memory. Cause: {e}"),
+                    })?
+                    .into_u256();
                 i += 0x20;
             }
         }
         // r_eval_computation
         {
-            let mut r_eval_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let mut r_eval_data = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load r_eval_data from memory. Cause: {e}"),
+                })?
+                .into_u256();
 
             let mptr_end = lsb16(&r_eval_data) + vka_end;
 
@@ -985,9 +1220,27 @@ fn verify_proof_inner<H: CurveHooks>(
             let mut r_eval_mptr = r_eval_ptr - 0x20;
 
             while sum_inv_mptr > sum_inv_mptr_end {
-                r_eval *= mload(memory, theta_mptr as u32 + 0xc0).unwrap().into_fr();
-                r_eval += mload(memory, sum_inv_mptr as u32).unwrap().into_fr()
-                    * mload(memory, r_eval_mptr as u32).unwrap().into_fr();
+                r_eval *= mload(memory, theta_mptr as u32 + 0xc0)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "Unable to update r_eval during r_eval computation. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr();
+                r_eval += mload(memory, sum_inv_mptr as u32)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "Unable to update r_eval during r_eval computation. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr()
+                    * mload(memory, r_eval_mptr as u32)
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!(
+                                "Unable to update r_eval during r_eval computation. Cause: {e}"
+                            ),
+                        })?
+                        .into_fr();
 
                 sum_inv_mptr -= 0x20;
                 r_eval_mptr -= 0x20;
@@ -999,16 +1252,26 @@ fn verify_proof_inner<H: CurveHooks>(
             pcs_ptr += 0x20;
         }
         // pairing_input_computations
-        let mut nu = mload(memory, theta_mptr as u32 + 0xC0).unwrap().into_fr();
+        let mut nu = mload(memory, theta_mptr as u32 + 0xC0)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load nu from memory. Cause: {e}"),
+            })?
+            .into_fr();
 
         {
-            let mut pairing_input_meta_data = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            let mut pairing_input_meta_data = mload(memory, pcs_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load pairing_input_meta_data from memory. Cause: {e}"
+                    ),
+                })?
+                .into_u256();
 
             let end_ptr_packed_lens = pcs_ptr + 0x20 * lsb8(&pairing_input_meta_data);
             pairing_input_meta_data >>= 8;
             let mut set_coeff = lsb16(&pairing_input_meta_data) + vka_end;
             pairing_input_meta_data >>= 16;
-            // let ec_points_cptr_packed = pairing_input_meta_data.0[0] & 0xFFFFFFFFFFFFFFFFFFFF;
+
             let mut ec_points_cptr_packed =
                 pairing_input_meta_data.bitand(U256::new([0xffffffffffffffffu64, 0xffffu64, 0, 0]));
 
@@ -1059,7 +1322,13 @@ fn verify_proof_inner<H: CurveHooks>(
                         nu *= mload(memory, theta_mptr as u32 + 0xc0).unwrap().into_fr();
                     }
                 }
-                pairing_input_meta_data = mload(memory, i as u32 + 0x20).unwrap().into_u256();
+                pairing_input_meta_data = mload(memory, i as u32 + 0x20)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "Unable to load pairing_input_meta_data from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_u256();
                 i += 0x20;
             }
             // Load G1's SRS generator from the VKA into memory
@@ -1067,13 +1336,17 @@ fn verify_proof_inner<H: CurveHooks>(
             // mstore(add(0x80, vka_end), mload(0x0260))
             let idx1 = 0x01c0 + VKA_OFFSET + MEMORY_OFFSET; // g1_x index
             let idx2 = vka_end + 0x80;
-            let g1_x_bytes = mload(&memory, idx1 as u32).unwrap();
+            let g1_x_bytes = mload(&memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load g1_x_bytes from memory. Cause: {e}"),
+            })?;
             memory[idx2..idx2 + 0x20].copy_from_slice(&g1_x_bytes);
 
             // mstore(add(0xa0, vka_end), mload(0x0280))
             let idx1 = 0x01e0 + VKA_OFFSET + MEMORY_OFFSET; // g1_y index
             let idx2 = vka_end + 0xa0;
-            let g1_y_bytes = mload(&memory, idx1 as u32).unwrap();
+            let g1_y_bytes = mload(&memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to load g1_y_bytes from memory. Cause: {e}"),
+            })?;
             memory[idx2..idx2 + 0x20].copy_from_slice(&g1_y_bytes);
 
             let s = -mload(memory, theta_mptr as u32 + 0x2a0).unwrap().into_fr();
@@ -1109,11 +1382,15 @@ fn verify_proof_inner<H: CurveHooks>(
             let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).unwrap());
             ec_add_acc::<H>(memory, &x, &y);
 
-            let w_prime_x =
-                load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32).unwrap();
+            let w_prime_x = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32)
+                .map_err(|e| VerifyError::InvalidProofError {
+                    message: format!("Unable to load w_prime_x from proof. Cause: {e}"),
+                })?;
             ec_points_cptr_packed >>= 16;
-            let w_prime_y =
-                load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32).unwrap();
+            let w_prime_y = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32)
+                .map_err(|e| VerifyError::InvalidProofError {
+                    message: format!("Unable to load w_prime_y from proof. Cause: {e}"),
+                })?;
             // mstore(add(0x80, vka_end), w_prime_x)
             let idx = 0x80 + vka_end;
             memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
@@ -1150,33 +1427,54 @@ fn verify_proof_inner<H: CurveHooks>(
 
     // Random linear combine with accumulator
     if !mload(memory, 0x0140 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
-        .unwrap()
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read has_accumulator field from VKA. Cause: {e}"),
+        })?
         .into_u256()
         .is_zero()
     {
         //     mstore(add(0x00, vka_end), mload(add(theta_mptr, 0x100)))
-        let mut bytes = mload(memory, theta_mptr as u32 + 0x100).unwrap();
+        let mut bytes =
+            mload(memory, theta_mptr as u32 + 0x100).map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to read from memory during random linear combine. Cause: {e}"
+                ),
+            })?;
         memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
         //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x120)))
-        bytes = mload(memory, theta_mptr as u32 + 0x120).unwrap();
+        bytes = mload(memory, theta_mptr as u32 + 0x120).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
         //     mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x140)))
-        bytes = mload(memory, theta_mptr as u32 + 0x140).unwrap();
+        bytes = mload(memory, theta_mptr as u32 + 0x140).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(&bytes);
         //     mstore(add(0x60, vka_end), mload(add(theta_mptr, 0x160)))
-        bytes = mload(memory, theta_mptr as u32 + 0x160).unwrap();
+        bytes = mload(memory, theta_mptr as u32 + 0x160).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(&bytes);
         //     mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x2c0)))
-        bytes = mload(memory, theta_mptr as u32 + 0x2c0).unwrap();
+        bytes = mload(memory, theta_mptr as u32 + 0x2c0).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(&bytes);
         //     mstore(add(0xa0, vka_end), mload(add(theta_mptr, 0x2e0)))
-        bytes = mload(memory, theta_mptr as u32 + 0x2e0).unwrap();
+        bytes = mload(memory, theta_mptr as u32 + 0x2e0).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[(vka_end + 0xa0)..(vka_end + 0xc0)].copy_from_slice(&bytes);
         //     mstore(add(0xc0, vka_end), mload(add(theta_mptr, 0x300)))
-        bytes = mload(memory, theta_mptr as u32 + 0x300).unwrap();
+        bytes = mload(memory, theta_mptr as u32 + 0x300).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[(vka_end + 0xc0)..(vka_end + 0xe0)].copy_from_slice(&bytes);
         //     mstore(add(0xe0, vka_end), mload(add(theta_mptr, 0x320)))
-        bytes = mload(memory, theta_mptr as u32 + 0x320).unwrap();
+        bytes = mload(memory, theta_mptr as u32 + 0x320).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[(vka_end + 0xe0)..(vka_end + 0x100)].copy_from_slice(&bytes);
 
         // let challenge := mod(keccak256(vka_end, add(0x100, vka_end)), R)
@@ -1197,23 +1495,37 @@ fn verify_proof_inner<H: CurveHooks>(
         ec_add_acc::<H>(memory, &x, &y);
         // mstore(add(theta_mptr, 0x2c0), mload(vka_end))
         let idx = theta_mptr + 0x2c0;
-        let bytes = mload(memory, vka_end as u32).unwrap();
+        let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
         // mstore(add(theta_mptr, 0x2e0), mload(add(0x20, vka_end)))
         let idx = theta_mptr + 0x2e0;
-        let bytes = mload(memory, vka_end as u32 + 0x20).unwrap();
+        let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
         // [pairing_rhs] += challenge * [acc_rhs]
         // mstore(vka_end, mload(add(theta_mptr, 0x140)))
         let idx = vka_end;
-        let bytes = mload(memory, theta_mptr as u32 + 0x140).unwrap();
+        let bytes =
+            mload(memory, theta_mptr as u32 + 0x140).map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to read from memory during random linear combine. Cause: {e}"
+                ),
+            })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
         // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x160)))
         let idx = vka_end + 0x20;
-        let bytes = mload(memory, theta_mptr as u32 + 0x160).unwrap();
+        let bytes =
+            mload(memory, theta_mptr as u32 + 0x160).map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to read from memory during random linear combine. Cause: {e}"
+                ),
+            })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
         ec_mul_acc::<H>(memory, &challenge);
@@ -1222,24 +1534,56 @@ fn verify_proof_inner<H: CurveHooks>(
         ec_add_acc::<H>(memory, &x, &y);
         // mstore(add(theta_mptr, 0x300), mload(vka_end))
         let idx = theta_mptr + 0x300;
-        let bytes = mload(memory, vka_end as u32).unwrap();
+        let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
         // mstore(add(theta_mptr, 0x320), mload(add(0x20, vka_end)))
         let idx = theta_mptr + 0x320;
-        let bytes = mload(memory, vka_end as u32 + 0x20).unwrap();
+        let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
+        })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
     }
 
     // Perform pairing
 
     // LHS
-    let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).unwrap());
-    let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).unwrap());
+    let x =
+        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to read LHS.x from memory during pairing computation phase. Cause: {e}"
+                ),
+            }
+        })?);
+    let y =
+        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to read LHS.y from memory during pairing computation phase. Cause: {e}"
+                ),
+            }
+        })?);
     let p_0 = G1::<H>::new(x, y);
     // RHS
-    let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).unwrap());
-    let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).unwrap());
+    let x =
+        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to read RHS.x from memory during pairing computation phase. Cause: {e}"
+                ),
+            }
+        })?);
+    let y =
+        Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to read RHS.y from memory during pairing computation phase. Cause: {e}"
+                ),
+            }
+        })?);
     let p_1 = G1::new(x, y);
 
     let g1_points = [G1Prepared::from(p_0), G1Prepared::from(p_1)];
@@ -1395,12 +1739,16 @@ fn squeeze_challenge_cont(
 
 // Returns start of computations ptr and length of SoA layout memory
 // encoding for quotient evaluation data (gate, permutation and lookup computations)
-fn soa_layout_metadata(memory: &[u8], offset: usize) -> (usize, usize) {
-    let computations_len_ptr = u32_from_be_tail(&mload(memory, offset as u32).unwrap());
-    (
+fn soa_layout_metadata(memory: &[u8], offset: usize) -> Result<(usize, usize), String> {
+    let computations_len_ptr = mload_u32(memory, offset as u32).map_err(|e| {
+        format!("soa_layout_metadata failed to parse computations_len_ptr as an u32. Cause: {e}")
+    })?;
+    Ok((
         computations_len_ptr as usize + 0x20,
-        u32_from_be_tail(&mload(memory, computations_len_ptr).unwrap()) as usize,
-    )
+        u32_from_be_tail(&mload(memory, computations_len_ptr).map_err(|e| {
+        format!("soa_layout_metadata failed to parse value at computations_len_ptr as an u32. Cause: {e}")
+    })?) as usize,
+    ))
 }
 
 fn expression_evals_packed(
