@@ -337,82 +337,9 @@ fn verify_proof_inner<H: CurveHooks>(
             })?
             .into_fr();
 
-        {
-            // Gate computations/expression evaluations.
-            let gate_computations_len_offset = VKA_OFFSET + 0x0340 + MEMORY_OFFSET;
-            let (mut computations_ptr, computations_len) =
-                soa_layout_metadata(memory, gate_computations_len_offset).map_err(|e| {
-                    VerifyError::KeyError {
-                        message: format!("{e}"),
-                    }
-                })?;
+        quotient_eval_numer =
+            perform_gate_computations(memory, raw_proof, vka_end, quotient_eval_numer, y)?;
 
-            let mut expressions_word = mload(memory, computations_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Failed to read expressions_word from memory. Cause: {e}"),
-                })?
-                .into_u256();
-            let mut last_idx: usize;
-
-            // Load in the total number of code blocks from the vk constants, right after the number of= challenges
-            // for { let code_block := 0 } lt(code_block, computations_len) { code_block := add(code_block, 0x20) } {
-            for code_block in (0..computations_len).step_by(0x20) {
-                // call expression_evals to evaluate the expressions in the code block
-                let po: ProcessOutput;
-                (computations_ptr, expressions_word, po) = expression_evals_packed(
-                    memory,
-                    raw_proof,
-                    vka_end,
-                    computations_ptr,
-                    expressions_word,
-                )
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("expression_evals_packed failed. Cause: {e:?}"),
-                })?;
-                match po {
-                    ProcessOutput::Index(ind) => {
-                        last_idx = ind;
-                    }
-                    _ => {
-                        return Err(VerifyError::OtherError {
-                            message: "po should always be an Index variant at this point"
-                                .to_string(),
-                        });
-                    }
-                }
-
-                // At the end of each code block we update `quotient_eval_numer`
-                // If this is the first code block, we set `quotient_eval_numer` to the last var in the code block
-                match code_block {
-                    0 => {
-                        quotient_eval_numer = mload(memory, (vka_end + last_idx) as u32)
-                            .map_err(|e| VerifyError::KeyError {
-                                message: format!(
-                                    "Unable to read quotient_eval_numer from memory. Cause: {e:?}"
-                                ),
-                            })?
-                            .into_fr()
-                    }
-                    1 => {
-                        // Otherwise we add the last var in the code block to `quotient_eval_numer` mod r
-                        quotient_eval_numer = quotient_eval_numer * y
-                            + mload(memory, (vka_end + last_idx) as u32)
-                                .map_err(|e| VerifyError::KeyError {
-                                    message: format!(
-                                        "Failed to compute quotient_eval_numer. Cause: {e:?}"
-                                    ),
-                                })?
-                                .into_fr();
-                    }
-                    _ => {
-                        // Invalid code_block value
-                        return Err(VerifyError::InvalidProofError {
-                            message: format!("Invalid code_block value {code_block}"),
-                        });
-                    }
-                }
-            }
-        }
         {
             // Permutation computations
             let mut permutation_z_evals_ptr = mload_u32(
@@ -3152,6 +3079,87 @@ fn compute_lagrange_and_instance_evaluation(
     memory[start..start + 0x20].copy_from_slice(&instance_eval.into_be_bytes32());
 
     Ok(())
+}
+
+// Gate computations/expression evaluations. Returns updated quotient_eval_numer.
+fn perform_gate_computations(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    vka_end: usize,
+    mut quotient_eval_numer: Fr,
+    y: Fr,
+) -> Result<Fr, VerifyError> {
+    let gate_computations_len_offset = VKA_OFFSET + 0x0340 + MEMORY_OFFSET;
+    let (mut computations_ptr, computations_len) =
+        soa_layout_metadata(memory, gate_computations_len_offset).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!("Failed to perform gate computations. Cause: {e}"),
+            }
+        })?;
+
+    let mut expressions_word = mload(memory, computations_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Failed to read expressions_word from memory. Cause: {e}"),
+        })?
+        .into_u256();
+    let mut last_idx: usize;
+
+    // Load in the total number of code blocks from the vk constants, right after the number of= challenges
+    for code_block in (0..computations_len).step_by(0x20) {
+        // call expression_evals to evaluate the expressions in the code block
+        let po: ProcessOutput;
+        (computations_ptr, expressions_word, po) = expression_evals_packed(
+            memory,
+            raw_proof,
+            vka_end,
+            computations_ptr,
+            expressions_word,
+        )
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("expression_evals_packed failed. Cause: {e:?}"),
+        })?;
+        match po {
+            ProcessOutput::Index(ind) => {
+                last_idx = ind;
+            }
+            _ => {
+                return Err(VerifyError::OtherError {
+                    message: "po should always be an Index variant at this point".to_string(),
+                });
+            }
+        }
+
+        // At the end of each code block we update `quotient_eval_numer`
+        // If this is the first code block, we set `quotient_eval_numer` to the last var in the code block
+        match code_block {
+            0 => {
+                quotient_eval_numer = mload(memory, (vka_end + last_idx) as u32)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "Unable to read quotient_eval_numer from memory. Cause: {e:?}"
+                        ),
+                    })?
+                    .into_fr()
+            }
+            1 => {
+                // Otherwise we add the last var in the code block to `quotient_eval_numer` mod r
+                quotient_eval_numer = quotient_eval_numer * y
+                    + mload(memory, (vka_end + last_idx) as u32)
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!("Failed to compute quotient_eval_numer. Cause: {e:?}"),
+                        })?
+                        .into_fr();
+            }
+            _ => {
+                // Invalid code_block value
+                return Err(VerifyError::InvalidProofError {
+                    message: format!("Invalid code_block value {code_block}"),
+                });
+            }
+        }
+    }
+
+    Ok(quotient_eval_numer)
 }
 
 #[cfg(test)]
