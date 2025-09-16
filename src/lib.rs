@@ -85,17 +85,15 @@ fn verify_proof_inner<H: CurveHooks>(
 ) -> Result<(), VerifyError> {
     let theta_mptr: usize;
     let mut proof_cptr: usize = PROOF_OFFSET;
-    let mut vka_end: usize; // TODO: DOUBLE-CHECK THAT MAKING THIS mut DOES NOT BREAK ANYTHING!
+    let vka_end = mload_u32(memory, 0x40).map_err(|e| VerifyError::KeyError {
+        message: format!("Unable to parse vka_end as u32. Cause: {}", e).to_string(),
+    })? as usize;
 
     {
         // let instance_cptr := instances.offset
 
         // // Check valid length of proof
         // success := and(success, eq(sub(instance_cptr, 0xa4), proof.length))
-
-        vka_end = mload_u32(memory, 0x40).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to parse vka_end as u32. Cause: {}", e).to_string(),
-        })? as usize;
 
         // copy the vka_digest to the vka_end location
         memory.extend_from_slice(
@@ -274,9 +272,44 @@ fn verify_proof_inner<H: CurveHooks>(
             }
         };
 
+        // TODO:
         // Read accumulator from instances
-        // TODO
-        // todo!()
+        // if !mload(memory, 0x0140 + VKA_OFFSET as u32 + 5*0x20).unwrap().into_u256().is_zero() { // Validation needed
+        //     let num_limbs = mload_u32(memory, 0x0180 + VKA_OFFSET as u32 + 5 * 0x20).unwrap();
+        //     let num_limb_bits = mload_u32(memory, 0x01a0 + VKA_OFFSET as u32 + 5 * 0x20).unwrap();
+
+        //     let cptr = add(instances.offset, mul(mload(0x0200), 0x20));
+        //     let lhs_y_off = num_limbs * 0x20;
+        //     let rhs_x_off = lhs_y_off * 2;
+        //     let rhs_y_off = lhs_y_off * 3;
+        //     let lhs_x = load_from_proof(raw_proof, cptr).unwrap();
+        //     let lhs_y = load_from_proof(raw_proof, cptr + lhs_y_off).unwrap();
+        //     let rhs_x = load_from_proof(raw_proof, cptr + rhs_x_off).unwrap();
+        //     let rhs_y = load_from_proof(raw_proof, cptr + rhs_y_off).unwrap();
+        //     for
+        //         {
+        //             let cptr_end := add(cptr, mul(0x20, num_limbs))
+        //             let shift := num_limb_bits
+        //         }
+        //         lt(cptr, cptr_end)
+        //         {}
+        //     {
+        //         cptr := add(cptr, 0x20)
+        //         lhs_x := add(lhs_x, shl(shift, calldataload(cptr)))
+        //         lhs_y := add(lhs_y, shl(shift, calldataload(add(cptr, lhs_y_off))))
+        //         rhs_x := add(rhs_x, shl(shift, calldataload(add(cptr, rhs_x_off))))
+        //         rhs_y := add(rhs_y, shl(shift, calldataload(add(cptr, rhs_y_off))))
+        //         shift := add(shift, num_limb_bits)
+        //     }
+
+        //     success := and(success, eq(mulmod(lhs_y, lhs_y, Q), addmod(mulmod(lhs_x, mulmod(lhs_x, lhs_x, Q), Q), 3, Q)))
+        //     success := and(success, eq(mulmod(rhs_y, rhs_y, Q), addmod(mulmod(rhs_x, mulmod(rhs_x, rhs_x, Q), Q), 3, Q)))
+
+        //     mstore(add(theta_mptr, 0x100), lhs_x)
+        //     mstore(add(theta_mptr, 0x120), lhs_y)
+        //     mstore(add(theta_mptr, 0x140), rhs_x)
+        //     mstore(add(theta_mptr, 0x160), rhs_y)
+        // }
     }
 
     // Compute Lagrange evaluations and instance evaluation
@@ -571,25 +604,46 @@ fn verify_proof_inner<H: CurveHooks>(
             // lookup meta data contains 32 byte flags for indicating if we need to do a lookup table lines
             // expression evaluation or we can use the previous one cached in the table var.
             if meta_data != 0 {
-                todo!("Restore this code on the second pass")
-                // let mut table: U256;
-                // let end_ptr = meta_data as u64 & PTR_BITMASK;
-                // let mv = (meta_data >> 16) as u64 & BYTE_FLAG_BITMASK;
-                // match mv {
-                //     0x0 => {
-                //         while evals_ptr < end_ptr {
-                //             evals_ptr, table, quotient_eval_numer = mv_lookup_evals(table, evals_ptr, quotient_eval_numer, y);
-                //         }
-                //     },
-                //     0x1 => {
-                //         // mstore(add(0xA0, vka_end), mload(add(theta_mptr, 0x40)))
-                //         memory[vka_end..vka_end + 0xa0].copy_from_slice(mload(memory, theta_mptr + 0x40)); // gamma
-                //         while evals_ptr < end_ptr {
-                //             evals_ptr, table, quotient_eval_numer = lookup_evals(table, evals_ptr, quotient_eval_numer, y);
-                //         }
-                //     },
-                //     _ => { return Err(VerifyError::KeyError { message: format!("Unsupported value for mv. Got: {mv}") }); }
-                // }
+                let mut table = Fr::ZERO;
+                let end_ptr = u32::try_from(meta_data as u64 & PTR_BITMASK)
+                    .expect("Conversion should succeed because this is just 2 bytes long");
+                let mv = (meta_data >> 16) as u64 & BYTE_FLAG_BITMASK;
+                match mv {
+                    0x0 => {
+                        while evals_ptr < end_ptr as usize {
+                            (evals_ptr, table, quotient_eval_numer) = mv_lookup_evals(
+                                memory,
+                                raw_proof,
+                                table,
+                                evals_ptr,
+                                quotient_eval_numer,
+                                y,
+                            )
+                            .unwrap();
+                        }
+                    }
+                    0x1 => {
+                        // mstore(add(0xA0, vka_end), mload(add(theta_mptr, 0x40)))
+                        let bytes = mload(memory, theta_mptr as u32 + 0x40).unwrap();
+                        memory[vka_end..vka_end + 0xa0].copy_from_slice(&bytes); // gamma
+                        while evals_ptr < end_ptr as usize {
+                            (evals_ptr, table, quotient_eval_numer) = lookup_evals(
+                                memory,
+                                raw_proof,
+                                table,
+                                evals_ptr,
+                                quotient_eval_numer,
+                                y,
+                            )
+                            .unwrap();
+                        }
+                    }
+                    _ => {
+                        return Err(VerifyError::KeyError {
+                            message: format!("Unsupported value for mv. Got: {mv}"),
+                        });
+                    }
+                }
             }
         }
 
@@ -687,7 +741,6 @@ fn verify_proof_inner<H: CurveHooks>(
             )
             .unwrap();
             pcs_ptr += 0x20;
-            // pop(x_pow_of_omega)
         }
 
         // vanishing_computations
@@ -1785,135 +1838,123 @@ fn mv_lookup_evals(
             .unwrap()
             .into_fr()
             - load_from_proof(raw_proof, phi as u32).unwrap().into_fr());
-
-    // quotient_eval_numer := addmod(
-    //                 mulmod(quotient_eval_numer, y, R),
-    //                 mulmod(
-    //                     addmod(
-    //                         1,
-    //                         sub(R, addmod(mload(add(0x40, mload(0x40))), mload(mload(0x40)), R)),
-    //                         R
-    //                     ),
-    //                     addmod(lhs, sub(R, rhs), R),
-    //                     R
-    //                 ),
-    //                 R
-    //             )
-
     quotient_eval_numer = quotient_eval_numer * y
         + (Fr::ONE
             - (mload(memory, 0x40 + fmp).unwrap().into_fr()
                 + mload(memory, fmp).unwrap().into_fr()))
             * (lhs - rhs);
-    // ret0 := evals_ptr
-    // ret1 := table
-    // ret2 := quotient_eval_numer
 
     Ok((evals_ptr, table, quotient_eval_numer))
 }
 
-// function lookup_evals(table, evals_ptr, quotient_eval_numer, y) -> ret0, ret1, ret2 {
-//     // iterate through the input_tables_len
-//     let evals := mload(evals_ptr)
-//     // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
-//     let new_table := and(evals, BYTE_FLAG_BITMASK)
-//     evals := shr(8, evals)
-//     let z := and(evals, PTR_BITMASK)
-//     evals := shr(16, evals)
-//     quotient_eval_numer := addmod(
-//         mulmod(quotient_eval_numer, y, R),
-//         addmod(
-//             mload(add(0x20, mload(0x40))),
-//             mulmod(
-//                 mload(add(0x20, mload(0x40))),
-//                 sub(R, calldataload(z)),
-//                 R
-//             ),
-//             R
-//         ),
-//         R
-//     )
-//     quotient_eval_numer := addmod(
-//         mulmod(quotient_eval_numer, y, R),
-//         mulmod(
-//             mload(mload(0x40)),
-//             addmod(
-//                 mulmod(calldataload(z), calldataload(z), R),
-//                 sub(R, calldataload(z)),
-//                 R
-//             ),
-//             R
-//         ),
-//         R
-//     )
-//     // load in the lookup_table_lines from the evals_ptr
-//     evals_ptr := add(evals_ptr, 0x20)
-//     // Due to the fact that lookups can share the previous table, we can cache it for reuse.
-//     let input_expression := mload(evals_ptr)
-//     if new_table {
-//         evals_ptr, input_expression, table := lookup_expr_evals_packed(add(0xc0, mload(0x40)), evals_ptr, mload(evals_ptr), 0x0)
-//     }
-//     // call the expression_evals function to evaluate the input_lines
-//     let input
-//     evals_ptr, input_expression, input := lookup_expr_evals_packed(add(0xc0, mload(0x40)), evals_ptr, input_expression, 0x0)
-//     let p_input := and(shr(16, evals), PTR_BITMASK)
-//     let p_table := and(shr(48, evals), PTR_BITMASK)
-//     quotient_eval_numer := addmod(
-//         mulmod(quotient_eval_numer, y, R),
-//         mulmod(
-//             addmod(
-//                 1,
-//                 sub(R, addmod(mload(add(0x40, mload(0x40))), mload(mload(0x40)), R)),
-//                 R
-//             ),
-//             addmod(
-//                 mulmod(
-//                     calldataload(and(evals, PTR_BITMASK)),
-//                     mulmod(
-//                         addmod(calldataload(p_input), mload(add(0x80, mload(0x40))), R),
-//                         addmod(calldataload(p_table), mload(add(0xa0, mload(0x40))), R),
-//                         R
-//                     ),
-//                     R
-//                 ),
-//                 sub(
-//                     R,
-//                     mulmod(
-//                         calldataload(z),
-//                         mulmod(addmod(input, mload(add(0x80, mload(0x40))), R), addmod(table, mload(add(0xa0, mload(0x40))), R), R),
-//                         R
-//                     )
-//                 ),
-//                 R
-//             ),
-//             R
-//         ),
-//         R
-//     )
-//     quotient_eval_numer := addmod(
-//         mulmod(quotient_eval_numer, y, R),
-//         mulmod(mload(add(0x20, mload(0x40))), addmod(calldataload(p_input), sub(R, calldataload(p_table)), R), R),
-//         R
-//     )
-//     quotient_eval_numer := addmod(
-//         mulmod(quotient_eval_numer, y, R),
-//         mulmod(
-//             addmod(
-//                 1,
-//                 sub(R, addmod(mload(add(0x40, mload(0x40))), mload(mload(0x40)), R)), R),
-//                 mulmod(
-//                     addmod(calldataload(p_input), sub(R, calldataload(p_table)), R),
-//                     addmod(calldataload(p_input), sub(R, calldataload(and(shr(32, evals), PTR_BITMASK))), R),
-//                     R
-//                 ),
-//             R
-//         ),
-//         R
-//     )
-//     ret0 := evals_ptr
-//     ret1 := table
-//     ret2 := quotient_eval_numer
-// }
+fn lookup_evals(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    mut table: Fr,
+    mut evals_ptr: usize,
+    mut quotient_eval_numer: Fr,
+    y: Fr,
+) -> Result<(usize, Fr, Fr), ()> {
+    // load the free memory pointer
+    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    // iterate through the input_tables_len
+    let mut evals = mload(memory, evals_ptr as u32).unwrap().into_u256();
+    // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
+    let new_table = lsb8(&evals);
+    evals >>= 8;
+    let z = lsb16(&evals) as u32;
+    evals >>= 16;
+    quotient_eval_numer = quotient_eval_numer * y
+        + mload(memory, 0x20 + fmp).unwrap().into_fr()
+        + mload(memory, 0x20 + fmp).unwrap().into_fr()
+            * load_from_proof(raw_proof, z)
+                .unwrap()
+                .into_fr()
+                .neg_in_place();
+
+    quotient_eval_numer = quotient_eval_numer * y
+        + mload(memory, fmp).unwrap().into_fr()
+            * load_from_proof(raw_proof, z).unwrap().into_fr()
+            * load_from_proof(raw_proof, z).unwrap().into_fr()
+        + load_from_proof(raw_proof, z)
+            .unwrap()
+            .into_fr()
+            .neg_in_place();
+
+    // load in the lookup_table_lines from the evals_ptr
+    evals_ptr += 0x20;
+    // Due to the fact that lookups can share the previous table, we can cache it for reuse.
+    let mut input_expression = mload(memory, evals_ptr as u32).unwrap().into_u256();
+    if new_table != 0 {
+        (evals_ptr, input_expression, table) = lookup_expr_evals_packed(
+            memory,
+            raw_proof,
+            0xc0 + fmp,
+            evals_ptr as u32,
+            mload(memory, evals_ptr as u32).unwrap().into_u256(),
+            false,
+        )?;
+    }
+    // call the expression_evals function to evaluate the input_lines
+    let input: Fr;
+    (evals_ptr, _, input) = lookup_expr_evals_packed(
+        memory,
+        raw_proof,
+        0xc0 + fmp,
+        evals_ptr as u32,
+        input_expression,
+        false,
+    )?;
+    let p_input = lsb16(&(evals >> 16));
+    let p_table = lsb16(&(evals >> 48));
+
+    quotient_eval_numer = quotient_eval_numer * y
+        + (Fr::ONE
+            - (mload(memory, 0x40 + fmp).unwrap().into_fr()
+                + mload(memory, fmp).unwrap().into_fr()))
+            * (load_from_proof(raw_proof, lsb16(&evals) as u32)
+                .unwrap()
+                .into_fr()
+                * (load_from_proof(raw_proof, p_input as u32)
+                    .unwrap()
+                    .into_fr()
+                    + mload(memory, 0x80 + fmp).unwrap().into_fr())
+                * (load_from_proof(raw_proof, p_table as u32)
+                    .unwrap()
+                    .into_fr()
+                    + mload(memory, 0xa0 + fmp).unwrap().into_fr())
+                - load_from_proof(raw_proof, z).unwrap().into_fr()
+                    * (input + mload(memory, 0x80 + fmp).unwrap().into_fr())
+                    * (table + mload(memory, 0xa0 + fmp).unwrap().into_fr()));
+
+    quotient_eval_numer = quotient_eval_numer * y
+        + (mload(memory, 0x20 + fmp).unwrap().into_fr()
+            * (load_from_proof(raw_proof, p_input as u32)
+                .unwrap()
+                .into_fr()
+                - load_from_proof(raw_proof, p_table as u32)
+                    .unwrap()
+                    .into_fr()));
+
+    quotient_eval_numer = quotient_eval_numer * y
+        + (Fr::ONE
+            - (mload(memory, 0x40 + fmp).unwrap().into_fr()
+                + mload(memory, fmp).unwrap().into_fr()))
+            * (load_from_proof(raw_proof, p_input as u32)
+                .unwrap()
+                .into_fr()
+                - load_from_proof(raw_proof, p_table as u32)
+                    .unwrap()
+                    .into_fr())
+            * (load_from_proof(raw_proof, p_input as u32)
+                .unwrap()
+                .into_fr()
+                - load_from_proof(raw_proof, lsb16(&(evals >> 32)) as u32)
+                    .unwrap()
+                    .into_fr());
+
+    Ok((evals_ptr, table, quotient_eval_numer))
+}
 
 // TODO: DO PROPER ERROR HANDLING...
 fn point_rots(
