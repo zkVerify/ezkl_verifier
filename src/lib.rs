@@ -524,7 +524,7 @@ fn verify_proof_inner<H: CurveHooks>(
                     raw_proof,
                     vka_end,
                     computations_ptr,
-                    &mut expressions_word,
+                    expressions_word,
                 )
                 .map_err(|e| VerifyError::KeyError {
                     message: format!("expression_evals_packed failed. Cause: {e:?}"),
@@ -764,7 +764,7 @@ fn verify_proof_inner<H: CurveHooks>(
 
         // mstore(add(theta_mptr, 0x240), mulmod(quotient_eval_numer, mload(add(theta_mptr, 0x1a0)), R))
         let idx = theta_mptr + 0x240;
-        let val = quotient_eval_numer * mload(memory, theta_mptr as u32 + 0x1a0).unwrap().into_fr();
+        let val = quotient_eval_numer * mload(memory, theta_mptr as u32 + 0x1a0).map_err(|e| VerifyError::KeyError { message: format!("Failed to read scalar from memory at the end of permutation computations phase. Cause: {e}" )})?.into_fr();
         memory[idx..(idx + 0x20)].copy_from_slice(&val.into_be_bytes32());
     }
 
@@ -818,19 +818,19 @@ fn verify_proof_inner<H: CurveHooks>(
                 message: "".to_string(),
             })?; // TODO: Replace with better Error variant
 
-            let x = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr).unwrap());
-            let y = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr + 0x20).unwrap());
+            let x = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read x coordinate from proof during the quotient commitment computation phase. Cause: {e}") })?);
+            let y = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr + 0x20).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read y coordinate from proof during the quotient commitment computation phase. Cause: {e}") })?);
             ec_add_acc::<H>(memory, &x, &y).map_err(|_| VerifyError::OtherError {
                 message: "".to_string(),
             })?; // TODO: Replace with better Error variant
             cptr -= 0x40;
         }
         // mstore(add(theta_mptr, 0x260), mload(vka_end))
-        let bytes = mload(memory, vka_end as u32).unwrap();
+        let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end during the quotient commitment computation phase. Cause: {e}") })?;
         memory[(theta_mptr + 0x260)..(theta_mptr + 0x260 + 0x20)].copy_from_slice(&bytes);
 
         // mstore(add(theta_mptr, 0x280), mload(add(0x20, vka_end)))
-        let bytes = mload(&memory, vka_end as u32 + 0x20).unwrap();
+        let bytes = mload(&memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end + 0x20 during the quotient commitment computation phase. Cause: {e}") })?;
         memory[(theta_mptr + 0x280)..(theta_mptr + 0x280 + 0x20)].copy_from_slice(&bytes);
     }
 
@@ -1420,14 +1420,25 @@ fn verify_proof_inner<H: CurveHooks>(
 
             // mstore(add(0x80, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
             let idx = 0x80 + vka_end;
-            let bytes = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32).unwrap();
+            let bytes = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(
+                |e| VerifyError::InvalidProofError {
+                    message: format!(
+                        "Unable to load from proof during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?;
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
             ec_points_cptr_packed >>= 16;
 
             // mstore(add(0xa0, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
             let idx = 0xa0 + vka_end;
-            let bytes = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32).unwrap();
+            let bytes = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32)
+                .map_err(|e| VerifyError::InvalidProofError {
+                    message: format!(
+                        "Unable to load from proof during pairing_input_computations. Cause: {e}"
+                    ),
+                })?;
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
             ec_points_cptr_packed >>= 16;
@@ -1463,12 +1474,12 @@ fn verify_proof_inner<H: CurveHooks>(
             )?);
             ec_add_acc::<H>(memory, &x, &y);
 
-            let w_prime_x = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32)
+            let w_prime_x = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32)
                 .map_err(|e| VerifyError::InvalidProofError {
                     message: format!("Unable to load w_prime_x from proof. Cause: {e}"),
                 })?;
             ec_points_cptr_packed >>= 16;
-            let w_prime_y = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32)
+            let w_prime_y = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32)
                 .map_err(|e| VerifyError::InvalidProofError {
                     message: format!("Unable to load w_prime_y from proof. Cause: {e}"),
                 })?;
@@ -1891,12 +1902,12 @@ fn expression_evals_packed(
     raw_proof: &[u8],
     fsmp: usize,
     code_ptr: usize,
-    expressions_word: &U256,
+    mut expressions_word: U256,
 ) -> Result<(usize, U256, ProcessOutput), ()> {
     // Load in the least significant byte of the `expressions_word` word to get the total number of words we will need to load in.
-    let num_words_shift_up_one = (0x20 * lsb8(expressions_word) + 0x20) as u32;
+    let num_words_shift_up_one = (0x20 * lsb8(&expressions_word) + 0x20) as u32;
 
-    let mut expressions_word = *expressions_word;
+    // let mut expressions_word = *expressions_word;
 
     // start of the expression encodings
     expressions_word >>= 8;
@@ -2117,26 +2128,52 @@ fn z_evals(
 fn col_evals(
     memory: &mut [u8],
     raw_proof: &[u8],
-    z: U256,
+    mut z: U256,
     num_words: usize,
     permutation_z_evals_ptr: usize,
     theta_mptr: usize,
-) {
-    let mut z = z;
-    let gamma = mload(memory, theta_mptr as u32 + 0x40).unwrap().into_fr();
-    let beta = mload(memory, theta_mptr as u32 + 0x20).unwrap().into_fr();
-    let l_last = mload(memory, theta_mptr as u32 + 0x1c0).unwrap().into_fr();
-    let l_blind = mload(memory, theta_mptr as u32 + 0x1e0).unwrap().into_fr();
-    let i_eval = mload(memory, theta_mptr as u32 + 0x220).unwrap().into_fr();
+) -> Result<(), VerifyError> {
+    let gamma = mload(memory, theta_mptr as u32 + 0x40)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load gamma from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let beta = mload(memory, theta_mptr as u32 + 0x20)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load beta from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let l_last = mload(memory, theta_mptr as u32 + 0x1c0)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load l_last from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let l_blind = mload(memory, theta_mptr as u32 + 0x1e0)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load l_blind from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let i_eval = mload(memory, theta_mptr as u32 + 0x220)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to load i_eval from memory. Cause: {e}"),
+        })?
+        .into_fr();
 
-    let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap()); // free memory pointer
+    // free memory pointer
+    let fmp = u32_from_be_tail(
+        &mload(memory, 0x40).expect("At this point, loading the fmp should succeed."),
+    );
 
     // Extract the index 1 and index 0 z evaluations from the z word.
     let mut lhs = load_from_proof(raw_proof, (lsb16(&(z >> 16))) as u32)
-        .unwrap()
+        .map_err(|e| VerifyError::InvalidProofError {
+            message: format!("Unable to load lhs from proof. Cause: {e}"),
+        })?
         .into_fr();
     let mut rhs = load_from_proof(raw_proof, (lsb16(&z)) as u32)
-        .unwrap()
+        .map_err(|e| VerifyError::InvalidProofError {
+            message: format!("Unable to load rhs from proof. Cause: {e}"),
+        })?
         .into_fr();
 
     z >>= 48;
@@ -2147,7 +2184,9 @@ fn col_evals(
 
             if lsb8(&z) == 0x00 {
                 eval = load_from_proof(raw_proof, (lsb16(&(z >> 8))) as u32)
-                    .unwrap()
+                    .map_err(|e| VerifyError::InvalidProofError {
+                        message: format!("Unable to load scalar from proof, in order to initialize eval. Cause: {e}"),
+                    })?
                     .into_fr();
             }
 
@@ -2167,7 +2206,9 @@ fn col_evals(
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
         }
         z = mload(memory, (permutation_z_evals_ptr + j + 0x20) as u32)
-            .unwrap()
+            .map_err(|e| VerifyError::InvalidProofError {
+                message: format!("Unable to load z from memory. Cause: {e}"),
+            })?
             .into_u256();
     }
     let left_sub_right = lhs - rhs;
@@ -2179,6 +2220,8 @@ fn col_evals(
 
     let idx = fmp as usize + 0x20;
     memory[idx..idx + 0x20].copy_from_slice(&(fsm_ptr + 0x20).into_u256().into_be_bytes32());
+
+    Ok(())
 }
 
 // TODO: Re-assess types of ret0, ret1, ret2; also for expression_evals_packed
@@ -2196,7 +2239,7 @@ fn lookup_expr_evals_packed(
         raw_proof,
         fsmp as usize,
         code_ptr as usize,
-        &expressions_word,
+        expressions_word,
     )?;
 
     match ret2 {
