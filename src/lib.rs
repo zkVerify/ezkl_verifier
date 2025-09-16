@@ -1396,10 +1396,26 @@ fn verify_proof_inner<H: CurveHooks>(
             })?;
             memory[idx2..idx2 + 0x20].copy_from_slice(&g1_y_bytes);
 
-            let s = -mload(memory, theta_mptr as u32 + 0x2a0).unwrap().into_fr();
+            let s = -mload(memory, theta_mptr as u32 + 0x2a0)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!("Unable to load scalar from memory during pairing_input_computations. Cause: {e}"),
+                })?
+                .into_fr();
             ec_mul_tmp::<H>(memory, &s);
-            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).unwrap());
-            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).unwrap());
+            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load x from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?);
+            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load y from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?);
             ec_add_acc::<H>(memory, &x, &y);
 
             // mstore(add(0x80, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
@@ -1420,13 +1436,31 @@ fn verify_proof_inner<H: CurveHooks>(
                 memory,
                 lsb16(&ec_points_cptr_packed) as u32 + vka_end as u32,
             )
-            .unwrap()
+            .map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?
             .into_fr();
             ec_mul_tmp::<H>(memory, &s);
             ec_points_cptr_packed >>= 16;
 
-            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).unwrap());
-            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).unwrap());
+            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load x from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?);
+            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load y from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?);
             ec_add_acc::<H>(memory, &x, &y);
 
             let w_prime_x = load_from_proof(raw_proof, (lsb16(&ec_points_cptr_packed)) as u32)
@@ -1446,20 +1480,50 @@ fn verify_proof_inner<H: CurveHooks>(
             let idx = 0xa0 + vka_end;
             memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
 
-            let s = mload(memory, theta_mptr as u32 + 0xe0).unwrap().into_fr();
+            let s = mload(memory, theta_mptr as u32 + 0xe0)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                })?
+                .into_fr();
             ec_mul_tmp::<H>(memory, &s);
-            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).unwrap());
-            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).unwrap());
+            let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load x from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?);
+            let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load y from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?);
             ec_add_acc::<H>(memory, &x, &y);
 
             // mstore(add(theta_mptr, 0x2C0), mload(vka_end))
             let idx = theta_mptr + 0x2c0;
-            let bytes = mload(memory, vka_end as u32).unwrap();
+            let bytes = mload(memory, vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?;
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
             // mstore(add(theta_mptr, 0x2E0), mload(add(0x20, vka_end)))
             let idx = theta_mptr + 0x2e0;
-            let bytes = mload(memory, 0x20 + vka_end as u32).unwrap();
+            let bytes = mload(memory, 0x20 + vka_end as u32).map_err(
+                |e| VerifyError::KeyError {
+                    message: format!(
+                        "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+                    ),
+                },
+            )?;
             memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
             // mstore(add(theta_mptr, 0x300), w_prime_x)
@@ -1537,8 +1601,20 @@ fn verify_proof_inner<H: CurveHooks>(
 
         // [pairing_lhs] += challenge * [acc_lhs]
         ec_mul_acc::<H>(memory, &challenge);
-        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).unwrap());
-        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).unwrap());
+        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).map_err(
+            |e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load x from memory during random linear combine phase. Cause: {e}"
+                ),
+            },
+        )?);
+        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2e0).map_err(
+            |e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load y from memory during random linear combine phase. Cause: {e}"
+                ),
+            },
+        )?);
         ec_add_acc::<H>(memory, &x, &y);
         // mstore(add(theta_mptr, 0x2c0), mload(vka_end))
         let idx = theta_mptr + 0x2c0;
@@ -1576,8 +1652,20 @@ fn verify_proof_inner<H: CurveHooks>(
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
         ec_mul_acc::<H>(memory, &challenge);
-        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).unwrap());
-        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).unwrap());
+        let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).map_err(
+            |e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load x from memory during random linear combine phase. Cause: {e}"
+                ),
+            },
+        )?);
+        let y = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x320).map_err(
+            |e| VerifyError::KeyError {
+                message: format!(
+                    "Unable to load y from memory during random linear combine phase. Cause: {e}"
+                ),
+            },
+        )?);
         ec_add_acc::<H>(memory, &x, &y);
         // mstore(add(theta_mptr, 0x300), mload(vka_end))
         let idx = theta_mptr + 0x300;
