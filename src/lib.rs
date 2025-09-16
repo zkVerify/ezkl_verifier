@@ -326,168 +326,7 @@ fn verify_proof_inner<H: CurveHooks>(
         // }
     }
 
-    // Compute Lagrange evaluations and instance evaluation
-    {
-        // Calculate vanishing polynomial numerator
-        let k = mload_u32(memory, (VKA_OFFSET + 0x00a0 + MEMORY_OFFSET) as u32).map_err(|e| {
-            VerifyError::KeyError {
-                message: format!("Unable to parse k from the VKA as an u32. Cause: {e}"),
-            }
-        })?;
-
-        let x = mload(memory, theta_mptr as u32 + 0x80)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!(
-                    "Failed reading x from memory at address 0x{:x?}. Cause: {e}",
-                    theta_mptr as u32 + 0x80
-                ),
-            })?
-            .into_fr();
-
-        let mut x_n = x;
-        for _ in 0..k {
-            x_n = x_n.square();
-        }
-
-        // Prepare denominators for Lagrange evaluation
-        let omega = mload(memory, (VKA_OFFSET + 0x00e0 + MEMORY_OFFSET) as u32)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!(
-                    "Failed reading omega from memory at address 0x{:x?}. Cause: {e}",
-                    (VKA_OFFSET + 0x00e0 + MEMORY_OFFSET) as u32
-                ),
-            })?
-            .into_fr();
-
-        let x_n_mptr = theta_mptr + 0x180;
-        let mut mptr = x_n_mptr;
-
-        let num_instances = mload_u32(memory, 0xe0).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to parse num_instances from VKA as an u32. Cause: {e}"),
-        })?;
-
-        let num_neg_lagranges = mload_u32(memory, 0x0480).map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to parse num_neg_lagranges from VKA as an u32. Cause: {e}"),
-        })?;
-
-        let mut mptr_end = mptr + 32 * (num_instances + num_neg_lagranges) as usize;
-        if num_instances == 0 {
-            mptr_end += 0x20;
-        }
-
-        let mut pow_of_omega = mload(memory, (VKA_OFFSET + 0x0120 + MEMORY_OFFSET) as u32)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Failed reading omega_inv_to_l from memory. Cause: {e}"),
-            })?
-            .into_fr();
-
-        while mptr_end >= memory.len() {
-            memory.extend_from_slice(&[0u8; 32]);
-        }
-
-        while mptr < mptr_end {
-            memory[mptr..mptr + 32].copy_from_slice(&(x - pow_of_omega).into_be_bytes32()); // mstore(mptr, addmod(x, sub(R, pow_of_omega),R))
-            pow_of_omega = pow_of_omega * omega;
-            mptr += 0x20;
-        }
-
-        let x_n_minus_1 = x_n - Fr::ONE;
-        memory[mptr_end..mptr_end + 32].copy_from_slice(&x_n_minus_1.into_be_bytes32()); // mstore(mptr_end, x_n_minus_1)
-
-        batch_invert_in_memory(memory, x_n_mptr as u32, mptr_end as u32 + 0x20);
-
-        let l_i_common = x_n_minus_1
-            * mload(memory, 0x0160)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to compute l_i_common. Cause: {e}"),
-                })?
-                .into_fr();
-        let mut pow_of_omega = mload(memory, 0x01c0)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to read pow_of_omega from VKA. Cause: {e}"),
-            })?
-            .into_fr();
-        for mptr in (x_n_mptr..mptr_end).step_by(0x20) {
-            // mstore(mptr, mulmod(l_i_common, mulmod(mload(mptr), pow_of_omega,R),R))
-            let zeta_minus_omega_i_inv = mload(memory, mptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!(
-                        "Unable to read zeta_minus_omega_i_inv from memory. Cause: {e}"
-                    ),
-                })?
-                .into_fr();
-            memory[mptr..mptr + 0x20].copy_from_slice(
-                &(l_i_common * zeta_minus_omega_i_inv * pow_of_omega).into_be_bytes32(),
-            );
-            pow_of_omega *= omega;
-        }
-
-        let mut l_blind = mload(memory, x_n_mptr as u32 + 0x20)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to initialize l_blind from memory. Cause: {e}"),
-            })?
-            .into_fr();
-        let l_i_cptr_end = x_n_mptr + 0x20 * num_neg_lagranges as usize;
-        let mut l_i_cptr = x_n_mptr + 0x40;
-
-        while l_i_cptr < l_i_cptr_end {
-            l_blind += mload(memory, l_i_cptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!(
-                        "Failed to read from memory while updating l_blind. Cause: {e}"
-                    ),
-                })?
-                .into_fr();
-            l_i_cptr += 0x20;
-        }
-
-        let mut instance_eval = Fr::ZERO;
-        for instance in pubs {
-            instance_eval += mload(memory, l_i_cptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!(
-                        "Failed to read from memory while updating instance_eval. Cause: {e}"
-                    ),
-                })?
-                .into_fr()
-                * instance.into_fr();
-            l_i_cptr += 0x20;
-        }
-
-        let x_n_minus_1_inv = mload(memory, mptr_end as u32)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to read x_n_minus_1_inv from memory. Cause: {e}"),
-            })?
-            .into_fr();
-        let l_last = mload(memory, x_n_mptr as u32)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to read l_last from memory. Cause: {e}"),
-            })?
-            .into_fr();
-        let l_0 = mload(memory, x_n_mptr as u32 + 0x20 * num_neg_lagranges)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Failed to read l_0 from memory. Cause: {e}"),
-            })?
-            .into_fr();
-
-        // mstore(x_n_mptr, x_n)
-        memory[x_n_mptr..x_n_mptr + 0x20].copy_from_slice(&x_n.into_be_bytes32());
-        // mstore(add(theta_mptr, 0x1a0), x_n_minus_1_inv)
-        let mut start = theta_mptr + 0x1a0;
-        memory[start..start + 0x20].copy_from_slice(&x_n_minus_1_inv.into_be_bytes32());
-        // mstore(add(theta_mptr, 0x1c0), l_last)
-        start += 0x20;
-        memory[start..start + 0x20].copy_from_slice(&l_last.into_be_bytes32());
-        // mstore(add(theta_mptr, 0x1e0), l_blind)
-        start += 0x20;
-        memory[start..start + 0x20].copy_from_slice(&l_blind.into_be_bytes32());
-        // mstore(add(theta_mptr, 0x200), l_0)
-        start += 0x20;
-        memory[start..start + 0x20].copy_from_slice(&l_0.into_be_bytes32());
-        // mstore(add(theta_mptr, 0x220), instance_eval)
-        start += 0x20;
-        memory[start..start + 0x20].copy_from_slice(&instance_eval.into_be_bytes32());
-    }
+    compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
 
     // Compute quotient evaluation
     {
@@ -3146,6 +2985,171 @@ fn batch_invert_in_memory(memory: &mut [u8], start: u32, end: u32) -> Result<(),
         memory[(start + i * 0x20)..start + (i + 1) * 0x20]
             .copy_from_slice(&inverses[i].into_be_bytes32()); // TODO: THIS CAN FAIL... (IndexOutOfBounds)
     }
+
+    Ok(())
+}
+
+// Compute Lagrange evaluations and instance evaluation.
+fn compute_lagrange_and_instance_evaluation(
+    memory: &mut Vec<u8>,
+    pubs: &Public,
+    theta_mptr: usize,
+) -> Result<(), VerifyError> {
+    // Calculate vanishing polynomial numerator
+    let k = mload_u32(memory, (VKA_OFFSET + 0x00a0 + MEMORY_OFFSET) as u32).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!("Unable to parse k from the VKA as an u32. Cause: {e}"),
+        }
+    })?;
+
+    let x = mload(memory, theta_mptr as u32 + 0x80)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "Failed reading x from memory at address 0x{:x?}. Cause: {e}",
+                theta_mptr as u32 + 0x80
+            ),
+        })?
+        .into_fr();
+
+    let mut x_n = x;
+    for _ in 0..k {
+        x_n = x_n.square();
+    }
+
+    // Prepare denominators for Lagrange evaluation
+    let omega = mload(memory, (VKA_OFFSET + 0x00e0 + MEMORY_OFFSET) as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "Failed reading omega from memory at address 0x{:x?}. Cause: {e}",
+                (VKA_OFFSET + 0x00e0 + MEMORY_OFFSET) as u32
+            ),
+        })?
+        .into_fr();
+
+    let x_n_mptr = theta_mptr + 0x180;
+    let mut mptr = x_n_mptr;
+
+    let num_instances = mload_u32(memory, 0xe0).map_err(|e| VerifyError::KeyError {
+        message: format!("Unable to parse num_instances from VKA as an u32. Cause: {e}"),
+    })?;
+
+    let num_neg_lagranges = mload_u32(memory, 0x0480).map_err(|e| VerifyError::KeyError {
+        message: format!("Unable to parse num_neg_lagranges from VKA as an u32. Cause: {e}"),
+    })?;
+
+    let mut mptr_end = mptr + 32 * (num_instances + num_neg_lagranges) as usize;
+    if num_instances == 0 {
+        mptr_end += 0x20;
+    }
+
+    let mut pow_of_omega = mload(memory, (VKA_OFFSET + 0x0120 + MEMORY_OFFSET) as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Failed reading omega_inv_to_l from memory. Cause: {e}"),
+        })?
+        .into_fr();
+
+    while mptr_end >= memory.len() {
+        memory.extend_from_slice(&[0u8; 32]);
+    }
+
+    while mptr < mptr_end {
+        memory[mptr..mptr + 32].copy_from_slice(&(x - pow_of_omega).into_be_bytes32()); // mstore(mptr, addmod(x, sub(R, pow_of_omega),R))
+        pow_of_omega = pow_of_omega * omega;
+        mptr += 0x20;
+    }
+
+    let x_n_minus_1 = x_n - Fr::ONE;
+    memory[mptr_end..mptr_end + 32].copy_from_slice(&x_n_minus_1.into_be_bytes32()); // mstore(mptr_end, x_n_minus_1)
+
+    batch_invert_in_memory(memory, x_n_mptr as u32, mptr_end as u32 + 0x20);
+
+    let l_i_common = x_n_minus_1
+        * mload(memory, 0x0160)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to compute l_i_common. Cause: {e}"),
+            })?
+            .into_fr();
+    let mut pow_of_omega = mload(memory, 0x01c0)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read pow_of_omega from VKA. Cause: {e}"),
+        })?
+        .into_fr();
+    for mptr in (x_n_mptr..mptr_end).step_by(0x20) {
+        // mstore(mptr, mulmod(l_i_common, mulmod(mload(mptr), pow_of_omega,R),R))
+        let zeta_minus_omega_i_inv = mload(memory, mptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to read zeta_minus_omega_i_inv from memory. Cause: {e}"),
+            })?
+            .into_fr();
+        memory[mptr..mptr + 0x20].copy_from_slice(
+            &(l_i_common * zeta_minus_omega_i_inv * pow_of_omega).into_be_bytes32(),
+        );
+        pow_of_omega *= omega;
+    }
+
+    let mut l_blind = mload(memory, x_n_mptr as u32 + 0x20)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to initialize l_blind from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let l_i_cptr_end = x_n_mptr + 0x20 * num_neg_lagranges as usize;
+    let mut l_i_cptr = x_n_mptr + 0x40;
+
+    while l_i_cptr < l_i_cptr_end {
+        l_blind += mload(memory, l_i_cptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Failed to read from memory while updating l_blind. Cause: {e}"),
+            })?
+            .into_fr();
+        l_i_cptr += 0x20;
+    }
+
+    let mut instance_eval = Fr::ZERO;
+    for instance in pubs {
+        instance_eval += mload(memory, l_i_cptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "Failed to read from memory while updating instance_eval. Cause: {e}"
+                ),
+            })?
+            .into_fr()
+            * instance.into_fr();
+        l_i_cptr += 0x20;
+    }
+
+    let x_n_minus_1_inv = mload(memory, mptr_end as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Failed to read x_n_minus_1_inv from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let l_last = mload(memory, x_n_mptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Failed to read l_last from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let l_0 = mload(memory, x_n_mptr as u32 + 0x20 * num_neg_lagranges)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Failed to read l_0 from memory. Cause: {e}"),
+        })?
+        .into_fr();
+
+    // mstore(x_n_mptr, x_n)
+    memory[x_n_mptr..x_n_mptr + 0x20].copy_from_slice(&x_n.into_be_bytes32());
+    // mstore(add(theta_mptr, 0x1a0), x_n_minus_1_inv)
+    let mut start = theta_mptr + 0x1a0;
+    memory[start..start + 0x20].copy_from_slice(&x_n_minus_1_inv.into_be_bytes32());
+    // mstore(add(theta_mptr, 0x1c0), l_last)
+    start += 0x20;
+    memory[start..start + 0x20].copy_from_slice(&l_last.into_be_bytes32());
+    // mstore(add(theta_mptr, 0x1e0), l_blind)
+    start += 0x20;
+    memory[start..start + 0x20].copy_from_slice(&l_blind.into_be_bytes32());
+    // mstore(add(theta_mptr, 0x200), l_0)
+    start += 0x20;
+    memory[start..start + 0x20].copy_from_slice(&l_0.into_be_bytes32());
+    // mstore(add(theta_mptr, 0x220), instance_eval)
+    start += 0x20;
+    memory[start..start + 0x20].copy_from_slice(&instance_eval.into_be_bytes32());
 
     Ok(())
 }
