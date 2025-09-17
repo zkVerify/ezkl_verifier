@@ -1,5 +1,5 @@
 [package]
-name = "ezkl-verifier"
+name = "ezkl-no-std"
 version = "0.1.0"
 keywords = ["cryptography", "elliptic-curves", "pairing", "zk-SNARKs"]
 categories = ["cryptography"]

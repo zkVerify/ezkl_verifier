@@ -74,10 +74,10 @@ pub fn verify<H: CurveHooks>(
 
     verify_proof_inner::<H>(&raw_proof, &pubs, &mut memory)
 
-    // TODO: Rescaling Phase (only if needed)
+    // TODO: Rescaling Phase (if needed)
 }
 
-/// Function performing the actual verification.
+/// Function performing the core verification.
 fn verify_proof_inner<H: CurveHooks>(
     raw_proof: &[u8],
     pubs: &Public,
@@ -87,7 +87,6 @@ fn verify_proof_inner<H: CurveHooks>(
     let vka_end = mload_u32(memory, 0x40).map_err(|e| VerifyError::KeyError {
         message: format!("Unable to parse vka_end as u32. Cause: {}", e).to_string(),
     })? as usize;
-
     let mut hash_mptr = vka_end + 0x20;
 
     // let instance_cptr := instances.offset

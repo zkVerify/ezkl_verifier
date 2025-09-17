@@ -1,4 +1,4 @@
-use ezkl_verifier::{PublicInput, verify};
+use ezkl_no_std::{PublicInput, verify};
 
 fn valid_raw_proof() -> [u8; 1248] {
     hex_literal::hex!(
