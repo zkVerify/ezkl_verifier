@@ -2,7 +2,7 @@
 #![doc = include_str!("../README.md")]
 
 mod constants;
-mod errors;
+pub mod errors;
 // mod proof;
 mod types;
 mod utils;
@@ -32,6 +32,7 @@ pub use types::*;
 
 pub const PUBS_SIZE: usize = 32;
 
+// Useful offsets during verification.
 const PROOF_OFFSET: usize = 0x84; // Offset of proof inside the calldata
 const VKA_OFFSET: usize = 0x0; // Offset inside the VKA file itself
 const MEMORY_OFFSET: usize = 5 * 0x20; // Where the VKA starts inside the memory vector
@@ -50,8 +51,6 @@ pub fn verify<H: CurveHooks>(
     raw_proof: &[u8],
     pubs: &Public,
 ) -> Result<(), VerifyError> {
-    // let vk = ...; // Parse VK
-
     let mut memory = Vec::<u8>::from(&mut [0u8; 64]);
 
     if raw_vka.len() == 0 || raw_vka.len() & 0x1f != 0 {
