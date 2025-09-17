@@ -28,6 +28,7 @@ use crate::{
     },
 };
 
+pub use errors::*;
 pub use types::*;
 
 pub const PUBS_SIZE: usize = 32;
