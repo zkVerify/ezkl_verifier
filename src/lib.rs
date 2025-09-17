@@ -21,7 +21,6 @@ use sha3::{Digest, Keccak256};
 
 use crate::{
     constants::{BYTE_FLAG_BITMASK, DELTA, PTR_BITMASK},
-    errors::VerifyError,
     utils::{
         IntoBEBytes32, IntoFr, IntoU256, load_from_proof, lsb8, lsb16, lsb32, mload, mload_u32,
         read_g1, read_g2, to_hex_string, u32_from_be_tail,
