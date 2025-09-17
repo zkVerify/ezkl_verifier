@@ -83,256 +83,62 @@ fn verify_proof_inner<H: CurveHooks>(
     pubs: &Public,
     memory: &mut Vec<u8>,
 ) -> Result<(), VerifyError> {
-    let theta_mptr: usize;
     let mut proof_cptr: usize = PROOF_OFFSET;
     let vka_end = mload_u32(memory, 0x40).map_err(|e| VerifyError::KeyError {
         message: format!("Unable to parse vka_end as u32. Cause: {}", e).to_string(),
     })? as usize;
 
-    {
-        // let instance_cptr := instances.offset
+    let mut hash_mptr = vka_end + 0x20;
 
-        // // Check valid length of proof
-        // success := and(success, eq(sub(instance_cptr, 0xa4), proof.length))
+    // let instance_cptr := instances.offset
 
-        // copy the vka_digest to the vka_end location
-        memory.extend_from_slice(
-            &mload(&memory, (VKA_OFFSET + 0xa0) as u32).expect("Should be able to extend memory."),
-        );
+    // Check valid length of proof
+    // success := and(success, eq(sub(instance_cptr, 0xa4), proof.length))
 
-        // Read instances and witness commitments and generate challenges
-        let mut hash_mptr = vka_end + 0x20;
+    let (
+        theta_mptr,
+        mut challenge_mptr,
+        challenge_len_ptr,
+        num_words,
+        num_evals,
+        challenge_len_data,
+    ) = initialize_memory(memory, vka_end)?;
 
-        // let proof_cptr := proof.offset
-        let mut challenge_mptr = vka_end
-            + mload_u32(memory, (VKA_OFFSET + 0xc0) as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to parse fsm as u32. Cause: {}", e).to_string(),
-            })? as usize;
-        // Set the theta_mptr (vk_mptr + vk_len + challenges_length)
-        theta_mptr = challenge_mptr
-            + mload_u32(memory, (VKA_OFFSET + 0x0120) as u32).map_err(|e| {
-                VerifyError::KeyError {
-                    message: format!("Unable to compute theta_mptr as u32. Cause: {}", e)
-                        .to_string(),
-                }
-            })? as usize;
+    (hash_mptr, proof_cptr, challenge_mptr) =
+        read_instances_and_witness_commitments_and_generate_challenges::<H>(
+            memory,
+            raw_proof,
+            pubs,
+            num_words as u32,
+            vka_end,
+            hash_mptr,
+            proof_cptr,
+            challenge_mptr,
+            challenge_len_ptr,
+            challenge_len_data,
+        )?;
 
-        let mut challenge_len_ptr = VKA_OFFSET + MEMORY_OFFSET + 0x420;
-        let mut challenge_len_data = mload(&memory, challenge_len_ptr as u32)
-            .map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to read challenge_len_data. Cause: {e}"),
-            })?
-            .into_u256();
-        let num_words = lsb8(&challenge_len_data);
+    (proof_cptr, hash_mptr) =
+        read_evaluations(memory, raw_proof, proof_cptr, hash_mptr, num_evals)?;
 
-        challenge_len_data >>= 8;
-        // num_evals is defined as u64 in order to be able to fit all possible u32 values
-        let num_evals = u64::from(
-            0x20 * mload_u32(memory, 0x60 + (VKA_OFFSET + MEMORY_OFFSET) as u32).map_err(|e| {
-                VerifyError::KeyError {
-                    message: format!("Unable to read num_evals as u32. Cause: {}", e).to_string(),
-                }
-            })?,
-        );
+    read_bdfg21_batch_opening_proof_and_generate_challenges::<H>(
+        memory,
+        raw_proof,
+        vka_end,
+        challenge_mptr,
+        hash_mptr,
+        proof_cptr,
+    )?;
 
-        for instance in pubs {
-            if instance.into_u256() >= Fr::MODULUS {
-                return Err(VerifyError::PublicInputError {
-                    message: format!(
-                        "Instance {} exceeds scalar field modulus.",
-                        to_hex_string(instance)
-                    ),
-                });
-            }
-            memory.extend_from_slice(instance);
-            hash_mptr += 0x20;
-        }
-
-        for _ in 0..num_words {
-            challenge_len_ptr += 0x20;
-            while !challenge_len_data.is_zero() {
-                // add proof_cptr to num advices len
-                let proof_cptr_end = proof_cptr + lsb16(&challenge_len_data) as usize;
-                challenge_len_data >>= 16;
-                // Phase loop
-                while proof_cptr < proof_cptr_end {
-                    match write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)
-                    {
-                        Ok((new_proof_cptr, new_hash_mptr)) => {
-                            proof_cptr = new_proof_cptr;
-                            hash_mptr = new_hash_mptr;
-                        }
-                        Err(e) => {
-                            return Err(e); // TODO: Rework to use better error propagation
-                        }
-                    };
-                }
-
-                // Generate challenges
-                match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
-                    Ok((new_challenge_mptr, new_hash_mptr)) => {
-                        challenge_mptr = new_challenge_mptr;
-                        hash_mptr = new_hash_mptr;
-                    }
-                    Err(_) => {
-                        return Err(VerifyError::OtherError {
-                            message: "Failed to squeeze challenge.".to_string(),
-                        }); // TODO: Rework to use better error propagation
-                    }
-                };
-
-                // Continue squeezing challenges based on num_challenges
-                let num_challenges = lsb8(&challenge_len_data) as usize;
-                challenge_len_data >>= 8;
-                for _ in 1..num_challenges {
-                    match squeeze_challenge_cont(memory, vka_end, challenge_mptr) {
-                        Ok(new_challenge_mptr) => {
-                            challenge_mptr = new_challenge_mptr;
-                        }
-                        Err(_) => {
-                            return Err(VerifyError::OtherError {
-                                message: "Failed to squeeze subsequent challenge.".to_string(),
-                            }); // TODO: Rework to use better error propagation
-                        }
-                    };
-                }
-            }
-            challenge_len_data = mload(&memory, challenge_len_ptr as u32)
-                .map_err(|e| VerifyError::KeyError {
-                    message: format!("Unable to read challenge_len_data from memory. Cause: {e}"),
-                })?
-                .into_u256();
-        }
-
-        // Read evaluations
-        let proof_cptr_end = proof_cptr + num_evals as usize; // num_evals
-        while proof_cptr < proof_cptr_end {
-            let eval: EVMWord = load_from_proof(raw_proof, proof_cptr as u32).map_err(|e| {
-                VerifyError::InvalidProofError {
-                    message: format!("Unable to read evaluation from proof. Cause: {e}"),
-                }
-            })?;
-            if eval.into_u256() >= Fr::MODULUS {
-                return Err(VerifyError::InvalidProofError {
-                    message: format!("Evaluation {} exceeds field modulus.", to_hex_string(&eval)),
-                });
-            }
-
-            memory[hash_mptr..hash_mptr + 32].copy_from_slice(&eval); // mstore(hash_mptr, eval)
-            proof_cptr += 0x20;
-            hash_mptr += 0x20;
-        }
-
-        // Read batch opening proof and generate challenges
-        // Bdfg21
-
-        // zeta
-        match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
-            Ok((new_challenge_mptr, new_hash_mptr)) => {
-                challenge_mptr = new_challenge_mptr;
-                hash_mptr = new_hash_mptr;
-            }
-            Err(_) => {
-                return Err(VerifyError::OtherError {
-                    message: "Failed to squeeze challenge.".to_string(),
-                });
-            }
-        };
-
-        // nu
-        match squeeze_challenge_cont(memory, vka_end, challenge_mptr) {
-            Ok(new_challenge_mptr) => {
-                challenge_mptr = new_challenge_mptr;
-            }
-            Err(_) => {
-                return Err(VerifyError::OtherError {
-                    message: "Failed to squeeze subsequent challenge.".to_string(),
-                });
-            }
-        };
-
-        // W
-        match write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr) {
-            Ok((new_proof_cptr, new_hash_mptr)) => {
-                proof_cptr = new_proof_cptr;
-                hash_mptr = new_hash_mptr;
-            }
-            Err(e) => {
-                return Err(e);
-            }
-        };
-
-        // mu
-        match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
-            Ok((new_challenge_mptr, new_hash_mptr)) => {
-                challenge_mptr = new_challenge_mptr;
-                hash_mptr = new_hash_mptr;
-            }
-            Err(_) => {
-                return Err(VerifyError::OtherError {
-                    message: "Failed to squeeze challenge.".to_string(),
-                });
-            }
-        };
-
-        // W'
-        match write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr) {
-            Ok((new_proof_cptr, new_hash_mptr)) => {
-                proof_cptr = new_proof_cptr;
-                hash_mptr = new_hash_mptr;
-            }
-            Err(e) => {
-                return Err(e);
-            }
-        };
-
-        // TODO:
-        // Read accumulator from instances
-        // if !mload(memory, 0x0140 + VKA_OFFSET as u32 + 5*0x20).unwrap().into_u256().is_zero() { // Validation needed
-        //     let num_limbs = mload_u32(memory, 0x0180 + VKA_OFFSET as u32 + 5 * 0x20).unwrap();
-        //     let num_limb_bits = mload_u32(memory, 0x01a0 + VKA_OFFSET as u32 + 5 * 0x20).unwrap();
-
-        //     let cptr = add(instances.offset, mul(mload(0x0200), 0x20));
-        //     let lhs_y_off = num_limbs * 0x20;
-        //     let rhs_x_off = lhs_y_off * 2;
-        //     let rhs_y_off = lhs_y_off * 3;
-        //     let lhs_x = load_from_proof(raw_proof, cptr).unwrap();
-        //     let lhs_y = load_from_proof(raw_proof, cptr + lhs_y_off).unwrap();
-        //     let rhs_x = load_from_proof(raw_proof, cptr + rhs_x_off).unwrap();
-        //     let rhs_y = load_from_proof(raw_proof, cptr + rhs_y_off).unwrap();
-        //     for
-        //         {
-        //             let cptr_end := add(cptr, mul(0x20, num_limbs))
-        //             let shift := num_limb_bits
-        //         }
-        //         lt(cptr, cptr_end)
-        //         {}
-        //     {
-        //         cptr := add(cptr, 0x20)
-        //         lhs_x := add(lhs_x, shl(shift, calldataload(cptr)))
-        //         lhs_y := add(lhs_y, shl(shift, calldataload(add(cptr, lhs_y_off))))
-        //         rhs_x := add(rhs_x, shl(shift, calldataload(add(cptr, rhs_x_off))))
-        //         rhs_y := add(rhs_y, shl(shift, calldataload(add(cptr, rhs_y_off))))
-        //         shift := add(shift, num_limb_bits)
-        //     }
-
-        //     success := and(success, eq(mulmod(lhs_y, lhs_y, Q), addmod(mulmod(lhs_x, mulmod(lhs_x, lhs_x, Q), Q), 3, Q)))
-        //     success := and(success, eq(mulmod(rhs_y, rhs_y, Q), addmod(mulmod(rhs_x, mulmod(rhs_x, rhs_x, Q), Q), 3, Q)))
-
-        //     mstore(add(theta_mptr, 0x100), lhs_x)
-        //     mstore(add(theta_mptr, 0x120), lhs_y)
-        //     mstore(add(theta_mptr, 0x140), rhs_x)
-        //     mstore(add(theta_mptr, 0x160), rhs_y)
-        // }
-    }
+    // TODO: Restore when implemented.
+    // read_accumulator_from_instances();
 
     compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
     perform_quotient_evaluation(memory, raw_proof, vka_end, theta_mptr)?;
-    compute_quotient_commitment::<H>(memory, raw_proof, vka_end, theta_mptr)?; // TODO: REMOVE H IF IT IS UNECESSARY...
+    compute_quotient_commitment::<H>(memory, raw_proof, vka_end, theta_mptr)?;
     compute_pairing_lhs_and_rhs::<H>(memory, raw_proof, vka_end, theta_mptr)?;
     random_linear_combine_with_accumulator::<H>(memory, vka_end, theta_mptr)?;
 
-    // Perform pairing
     pairing_check::<H>(memory, theta_mptr)
 }
 
@@ -3286,6 +3092,283 @@ fn pairing_check<H: CurveHooks>(memory: &mut [u8], theta_mptr: usize) -> Result<
         Err(VerifyError::VerificationError)
     }
 }
+
+// Initializes memory before challenge generation.
+// Returns initial values for: (theta_mptr, challenge_mptr, challenge_len_ptr, num_words, num_evals, challenge_len_data)
+fn initialize_memory(
+    memory: &mut Vec<u8>,
+    vka_end: usize,
+) -> Result<(usize, usize, usize, usize, u64, U256), VerifyError> {
+    // copy the vka_digest to the vka_end location
+    memory.extend_from_slice(
+        &mload(&memory, (VKA_OFFSET + 0xa0) as u32).expect("Should be able to extend memory."),
+    );
+
+    // let proof_cptr := proof.offset
+    let challenge_mptr = vka_end
+        + mload_u32(memory, (VKA_OFFSET + 0xc0) as u32).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to parse fsm as u32. Cause: {}", e).to_string(),
+        })? as usize;
+    // Set the theta_mptr (vk_mptr + vk_len + challenges_length)
+    let theta_mptr = challenge_mptr
+        + mload_u32(memory, (VKA_OFFSET + 0x0120) as u32).map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to compute theta_mptr as u32. Cause: {}", e).to_string(),
+        })? as usize;
+
+    let challenge_len_ptr = VKA_OFFSET + MEMORY_OFFSET + 0x420;
+    let mut challenge_len_data = mload(&memory, challenge_len_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read challenge_len_data. Cause: {e}"),
+        })?
+        .into_u256();
+    let num_words = lsb8(&challenge_len_data);
+
+    challenge_len_data >>= 8;
+    // num_evals is defined as u64 in order to be able to fit all possible u32 values
+    let num_evals = u64::from(
+        0x20 * mload_u32(memory, 0x60 + (VKA_OFFSET + MEMORY_OFFSET) as u32).map_err(|e| {
+            VerifyError::KeyError {
+                message: format!("Unable to read num_evals as u32. Cause: {}", e).to_string(),
+            }
+        })?,
+    );
+
+    Ok((
+        theta_mptr,
+        challenge_mptr,
+        challenge_len_ptr,
+        num_words,
+        num_evals,
+        challenge_len_data,
+    ))
+}
+
+// Read evaluations. Returns updated (proof_cptr, hash_mptr).
+fn read_evaluations(
+    memory: &mut [u8],
+    raw_proof: &[u8],
+    mut proof_cptr: usize,
+    mut hash_mptr: usize,
+    num_evals: u64,
+) -> Result<(usize, usize), VerifyError> {
+    let proof_cptr_end = proof_cptr + num_evals as usize; // num_evals
+    while proof_cptr < proof_cptr_end {
+        let eval: EVMWord = load_from_proof(raw_proof, proof_cptr as u32).map_err(|e| {
+            VerifyError::InvalidProofError {
+                message: format!("Unable to read evaluation from proof. Cause: {e}"),
+            }
+        })?;
+        if eval.into_u256() >= Fr::MODULUS {
+            return Err(VerifyError::InvalidProofError {
+                message: format!("Evaluation {} exceeds field modulus.", to_hex_string(&eval)),
+            });
+        }
+
+        memory[hash_mptr..hash_mptr + 32].copy_from_slice(&eval); // mstore(hash_mptr, eval)
+        proof_cptr += 0x20;
+        hash_mptr += 0x20;
+    }
+
+    Ok((proof_cptr, hash_mptr))
+}
+
+// Read instances and witness commitments and generate challenges.
+// Returns updated: (hash_mptr, proof_cptr, challenge_mptr)
+fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>(
+    memory: &mut Vec<u8>,
+    raw_proof: &[u8],
+    pubs: &Public,
+    num_words: u32,
+    vka_end: usize,
+    mut hash_mptr: usize,
+    mut proof_cptr: usize,
+    mut challenge_mptr: usize,
+    mut challenge_len_ptr: usize,
+    mut challenge_len_data: U256,
+) -> Result<(usize, usize, usize), VerifyError> {
+    for instance in pubs {
+        if instance.into_u256() >= Fr::MODULUS {
+            return Err(VerifyError::PublicInputError {
+                message: format!(
+                    "Instance {} exceeds scalar field modulus.",
+                    to_hex_string(instance)
+                ),
+            });
+        }
+        memory.extend_from_slice(instance);
+        hash_mptr += 0x20;
+    }
+
+    for _ in 0..num_words {
+        challenge_len_ptr += 0x20;
+        while !challenge_len_data.is_zero() {
+            // add proof_cptr to num advices len
+            let proof_cptr_end = proof_cptr + lsb16(&challenge_len_data) as usize;
+            challenge_len_data >>= 16;
+            // Phase loop
+            while proof_cptr < proof_cptr_end {
+                match write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr) {
+                    Ok((new_proof_cptr, new_hash_mptr)) => {
+                        proof_cptr = new_proof_cptr;
+                        hash_mptr = new_hash_mptr;
+                    }
+                    Err(e) => {
+                        return Err(e); // TODO: Rework to use better error propagation
+                    }
+                };
+            }
+
+            // Generate challenges
+            match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
+                Ok((new_challenge_mptr, new_hash_mptr)) => {
+                    challenge_mptr = new_challenge_mptr;
+                    hash_mptr = new_hash_mptr;
+                }
+                Err(_) => {
+                    return Err(VerifyError::OtherError {
+                        message: "Failed to squeeze challenge.".to_string(),
+                    }); // TODO: Rework to use better error propagation
+                }
+            };
+
+            // Continue squeezing challenges based on num_challenges
+            let num_challenges = lsb8(&challenge_len_data) as usize;
+            challenge_len_data >>= 8;
+            for _ in 1..num_challenges {
+                match squeeze_challenge_cont(memory, vka_end, challenge_mptr) {
+                    Ok(new_challenge_mptr) => {
+                        challenge_mptr = new_challenge_mptr;
+                    }
+                    Err(_) => {
+                        return Err(VerifyError::OtherError {
+                            message: "Failed to squeeze subsequent challenge.".to_string(),
+                        }); // TODO: Rework to use better error propagation
+                    }
+                };
+            }
+        }
+        challenge_len_data = mload(&memory, challenge_len_ptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("Unable to read challenge_len_data from memory. Cause: {e}"),
+            })?
+            .into_u256();
+    }
+
+    Ok((hash_mptr, proof_cptr, challenge_mptr))
+}
+
+// Read Bdfg21 batch opening proof and generate challenges.
+fn read_bdfg21_batch_opening_proof_and_generate_challenges<H: CurveHooks>(
+    memory: &mut Vec<u8>,
+    raw_proof: &[u8],
+    vka_end: usize,
+    mut challenge_mptr: usize,
+    mut hash_mptr: usize,
+    mut proof_cptr: usize,
+) -> Result<(), VerifyError> {
+    // zeta
+    match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
+        Ok((new_challenge_mptr, new_hash_mptr)) => {
+            challenge_mptr = new_challenge_mptr;
+            hash_mptr = new_hash_mptr;
+        }
+        Err(_) => {
+            return Err(VerifyError::OtherError {
+                message: "Failed to squeeze challenge.".to_string(),
+            });
+        }
+    };
+
+    // nu
+    match squeeze_challenge_cont(memory, vka_end, challenge_mptr) {
+        Ok(new_challenge_mptr) => {
+            challenge_mptr = new_challenge_mptr;
+        }
+        Err(_) => {
+            return Err(VerifyError::OtherError {
+                message: "Failed to squeeze subsequent challenge.".to_string(),
+            });
+        }
+    };
+
+    // W
+    match write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr) {
+        Ok((new_proof_cptr, new_hash_mptr)) => {
+            proof_cptr = new_proof_cptr;
+            hash_mptr = new_hash_mptr;
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    };
+
+    // mu
+    match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
+        Ok((new_challenge_mptr, new_hash_mptr)) => {
+            _ = new_challenge_mptr;
+            hash_mptr = new_hash_mptr;
+        }
+        Err(_) => {
+            return Err(VerifyError::OtherError {
+                message: "Failed to squeeze challenge.".to_string(),
+            });
+        }
+    };
+
+    // W'
+    match write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr) {
+        Ok((new_proof_cptr, new_hash_mptr)) => {
+            _ = new_proof_cptr;
+            _ = new_hash_mptr;
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    };
+
+    Ok(())
+}
+
+// TODO:
+// Read accumulator from instances
+// fn read_accumulator_from_instances() {
+// if !mload(memory, 0x0140 + VKA_OFFSET as u32 + 5*0x20).unwrap().into_u256().is_zero() { // Validation needed
+//     let num_limbs = mload_u32(memory, 0x0180 + VKA_OFFSET as u32 + 5 * 0x20).unwrap();
+//     let num_limb_bits = mload_u32(memory, 0x01a0 + VKA_OFFSET as u32 + 5 * 0x20).unwrap();
+
+//     let cptr = add(instances.offset, mul(mload(0x0200), 0x20));
+//     let lhs_y_off = num_limbs * 0x20;
+//     let rhs_x_off = lhs_y_off * 2;
+//     let rhs_y_off = lhs_y_off * 3;
+//     let lhs_x = load_from_proof(raw_proof, cptr).unwrap();
+//     let lhs_y = load_from_proof(raw_proof, cptr + lhs_y_off).unwrap();
+//     let rhs_x = load_from_proof(raw_proof, cptr + rhs_x_off).unwrap();
+//     let rhs_y = load_from_proof(raw_proof, cptr + rhs_y_off).unwrap();
+//     for
+//         {
+//             let cptr_end := add(cptr, mul(0x20, num_limbs))
+//             let shift := num_limb_bits
+//         }
+//         lt(cptr, cptr_end)
+//         {}
+//     {
+//         cptr := add(cptr, 0x20)
+//         lhs_x := add(lhs_x, shl(shift, calldataload(cptr)))
+//         lhs_y := add(lhs_y, shl(shift, calldataload(add(cptr, lhs_y_off))))
+//         rhs_x := add(rhs_x, shl(shift, calldataload(add(cptr, rhs_x_off))))
+//         rhs_y := add(rhs_y, shl(shift, calldataload(add(cptr, rhs_y_off))))
+//         shift := add(shift, num_limb_bits)
+//     }
+
+//     success := and(success, eq(mulmod(lhs_y, lhs_y, Q), addmod(mulmod(lhs_x, mulmod(lhs_x, lhs_x, Q), Q), 3, Q)))
+//     success := and(success, eq(mulmod(rhs_y, rhs_y, Q), addmod(mulmod(rhs_x, mulmod(rhs_x, rhs_x, Q), Q), 3, Q)))
+
+//     mstore(add(theta_mptr, 0x100), lhs_x)
+//     mstore(add(theta_mptr, 0x120), lhs_y)
+//     mstore(add(theta_mptr, 0x140), rhs_x)
+//     mstore(add(theta_mptr, 0x160), rhs_y)
+// }
+// }
 
 #[cfg(test)]
 mod should;
