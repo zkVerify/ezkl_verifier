@@ -160,8 +160,7 @@ fn check_public_input_number(memory: &[u8], pubs: &Public) -> Result<(), VerifyE
     if num_instances.into_u256() != num_instances_in_vka {
         return Err(VerifyError::PublicInputError {
             message: format!(
-                "Number of instances provided does not match those in the vka. Given: {}; Expected: {}",
-                num_instances, num_instances_in_vka
+                "Number of instances provided does not match those in the vka. Given: {num_instances}; Expected: {num_instances_in_vka}",
             ),
         });
     }
@@ -941,7 +940,7 @@ fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
         &mload(memory, 0x40).expect("Should be able to load vka_end from memory."),
     );
 
-    let point1 = read_g1::<H>(&memory, vka_end as usize + 0x80)
+    let point1 = read_g1::<H>(memory, vka_end as usize + 0x80)
         .unwrap()
         .into_group();
     let point2 = G1::<H>::new_unchecked(*x, *y);
@@ -3055,7 +3054,7 @@ fn pairing_check<H: CurveHooks>(memory: &mut [u8], theta_mptr: usize) -> Result<
 
     let g2_x_1_index = 0x0200 + VKA_OFFSET + MEMORY_OFFSET;
     let data = &memory[g2_x_1_index..g2_x_1_index + 4 * 0x20];
-    let h1 = read_g2::<H>(&data).expect("Parsing the SRS point should always work");
+    let h1 = read_g2::<H>(data).expect("Parsing the SRS point should always work");
     // TODO: VALIDATION REQUIRED!
     // mstore(add(0x40, vka_end), mload( {{ vk_const_offsets["g2_x_1"]|hex() }}))
     // mstore(add(0x60, vka_end), mload( {{ vk_const_offsets["g2_x_2"]|hex() }}))
@@ -3090,7 +3089,7 @@ fn initialize_memory(
 ) -> Result<(usize, usize, usize, usize, u64, U256), VerifyError> {
     // copy the vka_digest to the vka_end location
     memory.extend_from_slice(
-        &mload(&memory, (VKA_OFFSET + 0xa0) as u32).expect("Should be able to extend memory."),
+        &mload(memory, (VKA_OFFSET + 0xa0) as u32).expect("Should be able to extend memory."),
     );
 
     // let proof_cptr := proof.offset
@@ -3105,7 +3104,7 @@ fn initialize_memory(
         })? as usize;
 
     let challenge_len_ptr = VKA_OFFSET + MEMORY_OFFSET + 0x420;
-    let mut challenge_len_data = mload(&memory, challenge_len_ptr as u32)
+    let mut challenge_len_data = mload(memory, challenge_len_ptr as u32)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read challenge_len_data. Cause: {e}"),
         })?
@@ -3117,7 +3116,7 @@ fn initialize_memory(
     let num_evals = u64::from(
         0x20 * mload_u32(memory, 0x60 + (VKA_OFFSET + MEMORY_OFFSET) as u32).map_err(|e| {
             VerifyError::KeyError {
-                message: format!("Unable to read num_evals as u32. Cause: {}", e).to_string(),
+                message: format!("Unable to read num_evals as u32. Cause: {e}").to_string(),
             }
         })?,
     );
