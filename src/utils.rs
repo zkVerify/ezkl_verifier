@@ -255,7 +255,7 @@ pub(crate) fn mload(memory: &[u8], addr: u32) -> Result<EVMWord, UtilityError> {
 // Utility function for parsing a u32 from an EVMWord, while also
 // checking that it does not exceed u32::MAX.
 pub(crate) fn mload_u32(memory: &[u8], addr: u32) -> Result<u32, UtilityError> {
-    let bytes = &mload(&memory, addr)?;
+    let bytes = &mload(memory, addr)?;
     // perform validation
     if bytes.into_u256() > MAX_U32 {
         return Err(UtilityError::MloadU32Error {
@@ -292,6 +292,6 @@ pub(crate) fn u32_from_be_tail(bytes: &EVMWord) -> u32 {
 
 // Utility for debugging.
 pub(crate) fn to_hex_string(data: &[u8]) -> String {
-    let hex_string: String = data.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("0x{}", hex_string)
+    let hex_string: String = data.iter().map(|b| format!("{b:02x}")).collect();
+    format!("0x{hex_string}")
 }
