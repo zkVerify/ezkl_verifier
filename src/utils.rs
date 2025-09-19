@@ -2,6 +2,7 @@ use crate::constants::MAX_U32;
 use crate::errors::{GroupError, UtilityError};
 use crate::{BYTE_FLAG_BITMASK, G2, PROOF_OFFSET, PTR_BITMASK};
 use crate::{EVMWord, Fq, Fr, U256, errors::FieldError, types::G1};
+use alloc::{format, string::String};
 use ark_bn254::Fq2;
 use ark_bn254_ext::CurveHooks;
 use ark_ec::AffineRepr;

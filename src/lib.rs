@@ -11,7 +11,11 @@ mod utils;
 extern crate alloc;
 extern crate core;
 
-use alloc::{format, string::ToString, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use ark_bn254_ext::CurveHooks;
 use ark_ec::{AffineRepr, CurveGroup, pairing::Pairing};
 use ark_ff::{AdditiveGroup, BigInteger, Field, One, PrimeField, fields::batch_inversion};
