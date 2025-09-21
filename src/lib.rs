@@ -135,11 +135,20 @@ fn verify_proof_inner<H: CurveHooks>(
     // TODO: Restore when implemented.
     // read_accumulator_from_instances();
 
+    println!("About to start...");
+
     compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
+    println!("compute_lagrange_and_instance_evaluation done!");
     perform_quotient_evaluation(memory, raw_proof, vka_end, theta_mptr)?;
+    println!("perform_quotient_evaluation done!");
     compute_quotient_commitment::<H>(memory, raw_proof, vka_end, theta_mptr)?;
+    println!("compute_quotient_commitment done!");
     compute_pairing_lhs_and_rhs::<H>(memory, raw_proof, vka_end, theta_mptr)?;
+    println!("compute_pairing_lhs_and_rhs done!");
     random_linear_combine_with_accumulator::<H>(memory, vka_end, theta_mptr)?;
+    println!("random_linear_combine_with_accumulator done!");
+
+    println!("About to check pairing condition...");
 
     pairing_check::<H>(memory, theta_mptr)
 }
@@ -1731,8 +1740,8 @@ fn perform_gate_computations(
 
         // At the end of each code block we update `quotient_eval_numer`
         // If this is the first code block, we set `quotient_eval_numer` to the last var in the code block
-        match code_block {
-            0 => {
+        match code_block == 0 {
+            true => {
                 quotient_eval_numer = mload(memory, (vka_end + last_idx) as u32)
                     .map_err(|e| VerifyError::KeyError {
                         message: format!(
@@ -1741,7 +1750,7 @@ fn perform_gate_computations(
                     })?
                     .into_fr()
             }
-            1 => {
+            false => {
                 // Otherwise we add the last var in the code block to `quotient_eval_numer` mod r
                 quotient_eval_numer = quotient_eval_numer * y
                     + mload(memory, (vka_end + last_idx) as u32)
@@ -1749,12 +1758,6 @@ fn perform_gate_computations(
                             message: format!("Failed to compute quotient_eval_numer. Cause: {e:?}"),
                         })?
                         .into_fr();
-            }
-            _ => {
-                // Invalid code_block value
-                return Err(VerifyError::InvalidProofError {
-                    message: format!("Invalid code_block value {code_block}"),
-                });
             }
         }
     }
