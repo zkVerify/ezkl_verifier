@@ -135,20 +135,11 @@ fn verify_proof_inner<H: CurveHooks>(
     // TODO: Restore when implemented.
     // read_accumulator_from_instances();
 
-    println!("About to start...");
-
     compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
-    println!("compute_lagrange_and_instance_evaluation done!");
     perform_quotient_evaluation(memory, raw_proof, vka_end, theta_mptr)?;
-    println!("perform_quotient_evaluation done!");
     compute_quotient_commitment::<H>(memory, raw_proof, vka_end, theta_mptr)?;
-    println!("compute_quotient_commitment done!");
     compute_pairing_lhs_and_rhs::<H>(memory, raw_proof, vka_end, theta_mptr)?;
-    println!("compute_pairing_lhs_and_rhs done!");
     random_linear_combine_with_accumulator::<H>(memory, vka_end, theta_mptr)?;
-    println!("random_linear_combine_with_accumulator done!");
-
-    println!("About to check pairing condition...");
 
     pairing_check::<H>(memory, theta_mptr)
 }
@@ -2009,7 +2000,7 @@ fn perform_quotient_evaluation(
 
 // Compute quotient commitment
 fn compute_quotient_commitment<H: CurveHooks>(
-    memory: &mut [u8],
+    memory: &mut Vec<u8>,
     raw_proof: &[u8],
     vka_end: usize,
     theta_mptr: usize,
@@ -2059,6 +2050,7 @@ fn compute_quotient_commitment<H: CurveHooks>(
     let cptr_end =  mload_u32(memory, first_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
                 message: format!("Failed to initialize cptr_end during quotient commitment computation phase. Cause: {e}"),
             })? - 0x40;
+
     while cptr_end < cptr {
         ec_mul_acc::<H>(memory, &x_n).map_err(|_| VerifyError::OtherError {
             message: "".to_string(),
@@ -2071,6 +2063,12 @@ fn compute_quotient_commitment<H: CurveHooks>(
         })?; // TODO: Replace with better Error variant
         cptr -= 0x40;
     }
+
+    // PATCH FIX
+    while theta_mptr + 0x280 >= memory.len() {
+        memory.extend_from_slice(&[0u8; 32]);
+    }
+
     // mstore(add(theta_mptr, 0x260), mload(vka_end))
     let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end during the quotient commitment computation phase. Cause: {e}") })?;
     memory[(theta_mptr + 0x260)..(theta_mptr + 0x260 + 0x20)].copy_from_slice(&bytes);
@@ -2479,7 +2477,7 @@ fn perform_coeff_sums_computation(
 
 // Performs r_eval_computation. Returns updated value of pcs_ptr.
 fn perform_r_eval_computation(
-    memory: &mut [u8],
+    memory: &mut Vec<u8>,
     vka_end: usize,
     theta_mptr: usize,
     mut pcs_ptr: usize,
@@ -2552,6 +2550,10 @@ fn perform_r_eval_computation(
     }
     // mstore(add(theta_mptr, 0x2A0), r_eval)
     let idx = theta_mptr + 0x2a0;
+    // PATCH FIX
+    while idx >= memory.len() {
+        memory.extend_from_slice(&[0u8; 32]);
+    }
     memory[idx..idx + 0x20].copy_from_slice(&r_eval.into_be_bytes32());
 
     pcs_ptr += 0x20;
@@ -2561,7 +2563,7 @@ fn perform_r_eval_computation(
 
 // pairing_input_computations
 fn perform_pairing_input_computations<H: CurveHooks>(
-    memory: &mut [u8],
+    memory: &mut Vec<u8>,
     raw_proof: &[u8],
     vka_end: usize,
     theta_mptr: usize,
@@ -2802,6 +2804,11 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     })?);
     ec_add_acc::<H>(memory, &x, &y);
 
+    // PATCH FIX
+    while theta_mptr + 0x320 >= memory.len() {
+        memory.extend_from_slice(&[0u8; 32]);
+    }
+
     // mstore(add(theta_mptr, 0x2C0), mload(vka_end))
     let idx = theta_mptr + 0x2c0;
     let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
@@ -2833,7 +2840,7 @@ fn perform_pairing_input_computations<H: CurveHooks>(
 
 // Compute pairing lhs and rhs
 fn compute_pairing_lhs_and_rhs<H: CurveHooks>(
-    memory: &mut [u8],
+    memory: &mut Vec<u8>,
     raw_proof: &[u8],
     vka_end: usize,
     theta_mptr: usize,
