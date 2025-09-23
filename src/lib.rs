@@ -470,6 +470,8 @@ fn lookup_input_accum(
     i: usize,
     code_ptr: usize,
 ) -> Result<(usize, U256, Fr), ()> {
+    println!("lookup_input_accum invoked!");
+
     let mut ret0: usize = 0;
     let mut expressions_word = *expressions_word;
     expressions_word >>= 8;
@@ -1042,15 +1044,24 @@ fn ec_mul_acc<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
 // Add (x, y) into point at (0x00, 0x20).
 // Return updated (success).
 fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()> {
+    println!("ec_add_acc invoked!");
     let vka_end = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to load vka_end from memory."),
     );
 
     let point1 = read_g1::<H>(memory, vka_end as usize).unwrap().into_group();
-    let point2 = G1::<H>::new_unchecked(*x, *y);
+    let mut point2;
+    if *x == Fq::ZERO && *y == Fq::ZERO {
+        point2 = G1::zero();
+    } else {
+        point2 = G1::<H>::new_unchecked(*x, *y);
+    }
+
+    println!("Successfully read G1 points!");
 
     // Validate point2
     if !point2.is_on_curve() {
+        println!("POINT2 IS NOT ON THE CURVE!!!");
         return Err(());
     }
 
@@ -1086,7 +1097,12 @@ fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
     let point1 = read_g1::<H>(memory, vka_end as usize + 0x80)
         .unwrap()
         .into_group();
-    let point2 = G1::<H>::new_unchecked(*x, *y);
+    let mut point2;
+    if *x == Fq::ZERO && *y == Fq::ZERO {
+        point2 = G1::zero();
+    } else {
+        point2 = G1::<H>::new_unchecked(*x, *y);
+    }
 
     // Validate point2
     if !point2.is_on_curve() {
@@ -1168,7 +1184,7 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
 
             println!(
-                "Case 0x01: Wrote {} at 0x{:?}",
+                "Case 0x01: Wrote {} at 0x{:x?}",
                 to_hex_string(&val.into_be_bytes32()),
                 idx
             );
@@ -1207,7 +1223,7 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
                 memory[idx..idx + 0x20].copy_from_slice(&coeff.into_be_bytes32());
 
                 println!(
-                    "Case _ (default): Wrote {} at 0x{:?}",
+                    "Case _ (default): Wrote {} at 0x{:x?}",
                     to_hex_string(&coeff.into_be_bytes32()),
                     idx
                 );
@@ -1401,6 +1417,9 @@ fn pairing_input_computations_first<H: CurveHooks>(
             data >>= 8;
             let comm_len = lsb8(&data);
             data >>= 8;
+
+            println!("comm_len = 0x{:x?}, ptr_loc = 0x{:x?}", comm_len, ptr_loc);
+
             match comm_len {
                 0x0 => {
                     match ptr_loc {
@@ -1409,16 +1428,26 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             data >>= 16;
                             let mptr_end = lsb16(&data);
                             while mptr_end < mptr {
+                                println!("mptr_end = 0x{:x?}; mptr = 0x{:x?}", mptr_end, mptr);
+
                                 let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
                                 ec_mul_acc::<H>(memory, &s)?;
+                                println!("ec_mul_acc is OK");
                                 let x = Fq::from_be_bytes_mod_order(
                                     &mload(memory, mptr as u32).unwrap(),
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
                                     &mload(memory, mptr as u32 + 0x20).unwrap(),
                                 );
+                                println!("Point2's coordinates:");
+                                println!("x = {}", to_hex_string(&x.into_be_bytes32()));
+                                println!("y = {}", to_hex_string(&y.into_be_bytes32()));
+
                                 ec_add_acc::<H>(memory, &x, &y)?;
+                                println!("ec_add_acc is OK");
                                 mptr -= 0x40;
+
+                                println!("At the end of the loop: mptr = 0x{:x?}", mptr);
                             }
                         }
                         0x1 => {
@@ -1426,6 +1455,8 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             data >>= 16;
                             let mptr_end = lsb16(&data);
                             while mptr_end < mptr {
+                                println!("mptr_end = 0x{:x?}, mptr = 0x{:x?}", mptr_end, mptr);
+
                                 let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
                                 ec_mul_acc::<H>(memory, &s)?;
                                 let x = Fq::from_be_bytes_mod_order(
