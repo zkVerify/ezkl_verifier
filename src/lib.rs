@@ -92,6 +92,8 @@ fn verify_proof_inner<H: CurveHooks>(
     })? as usize;
     let mut hash_mptr = vka_end + 0x20;
 
+    println!("Begin verify_proof_inner");
+
     // let instance_cptr := instances.offset
 
     // Check valid length of proof
@@ -105,6 +107,9 @@ fn verify_proof_inner<H: CurveHooks>(
         num_evals,
         challenge_len_data,
     ) = initialize_memory(memory, vka_end)?;
+
+    println!("Memory initialization complete!");
+    println!("Reading instances and generating challenges...");
 
     (hash_mptr, proof_cptr, challenge_mptr) =
         read_instances_and_witness_commitments_and_generate_challenges::<H>(
@@ -178,6 +183,8 @@ pub(crate) fn write_ec_point_into_memory<H: CurveHooks>(
     proof_cptr: usize,
     hash_mptr: usize,
 ) -> Result<(usize, usize), VerifyError> {
+    println!("write_ec_point_into_memory called!");
+
     let point = read_g1::<H>(proof, proof_cptr - PROOF_OFFSET).map_err(|e| {
         VerifyError::InvalidProofError {
             message: format!("Invalid Proof. Unable to read G1 point from proof. Cause: {e}"),
@@ -187,6 +194,17 @@ pub(crate) fn write_ec_point_into_memory<H: CurveHooks>(
     while hash_mptr + 0x20 >= memory.len() {
         memory.extend_from_slice(&[0u8; 32]);
     }
+
+    println!(
+        "Writing {} to 0x{:x?}",
+        to_hex_string(&point.x().unwrap().into_be_bytes32()),
+        hash_mptr
+    );
+    println!(
+        "Writing {} to 0x{:x?}",
+        to_hex_string(&point.y().unwrap().into_be_bytes32()),
+        hash_mptr + 0x20
+    );
 
     memory[hash_mptr..hash_mptr + 0x20].copy_from_slice(
         &point
@@ -218,18 +236,31 @@ fn squeeze_challenge(
     let start = vka_end;
     let end = hash_mptr; // start + hash_mptr - vka_end
 
+    println!("squeeze_challenge invoked!");
+
     let hash: [u8; 32] = Keccak256::new()
         .chain_update(&memory[start..end])
         .finalize()
         .into();
 
     // write hash into memory for use for subsequent challenge generation(s).
+    println!(
+        "Writing hash = {} to 0x{:x?}",
+        to_hex_string(&hash),
+        vka_end
+    );
+
     memory[vka_end..vka_end + 0x20].copy_from_slice(&hash); // mstore(vka_end, hash)
     while challenge_mptr >= memory.len() {
         memory.extend_from_slice(&[0u8; 32]);
     }
 
     // write hash (mod R) into memory.
+    println!(
+        "Writing hash (mod R) = {} to 0x{:x?}",
+        to_hex_string(&hash.into_fr().into_be_bytes32()),
+        challenge_mptr
+    );
     memory[challenge_mptr..challenge_mptr + 0x20]
         .copy_from_slice(&hash.into_fr().into_be_bytes32()); // mstore(challenge_mptr, mod(hash, R))
 
@@ -253,10 +284,24 @@ fn squeeze_challenge_cont(
         .finalize()
         .into();
 
+    println!("squeeze_challenge_cont invoked!");
+
+    println!(
+        "Writing hash = {} to 0x{:x?}",
+        to_hex_string(&hash),
+        vka_end
+    );
     memory[vka_end..vka_end + 0x20].copy_from_slice(&hash); // mstore(vka_end, hash)
     while challenge_mptr >= memory.len() {
         memory.extend_from_slice(&[0u8; 32]);
     }
+
+    println!(
+        "Writing hash (mod R) = {} to 0x{:x?}",
+        to_hex_string(&hash.into_fr().into_be_bytes32()),
+        challenge_mptr
+    );
+
     memory[challenge_mptr..challenge_mptr + 0x20]
         .copy_from_slice(&hash.into_fr().into_be_bytes32()); // mstore(challenge_mptr, mod(hash, R))
 
@@ -287,6 +332,8 @@ fn expression_evals_packed(
     // Load in the least significant byte of the `expressions_word` word to get the total number of words we will need to load in.
     let num_words_shift_up_one = (0x20 * lsb8(&expressions_word) + 0x20) as u32;
 
+    println!("expression_evals_packed invoked!");
+
     // let mut expressions_word = *expressions_word;
 
     // start of the expression encodings
@@ -305,9 +352,15 @@ fn expression_evals_packed(
                 0x00 => {
                     expressions_word >>= 8;
                     // Load the calldata ptr from the expression, which come from the 2nd and 3rd least significant bytes.
-                    let idx = lsb16(&expressions_word) - PROOF_OFFSET;
+                    let idx = lsb16(&expressions_word);
                     memory[mstore_ptr..mstore_ptr + 0x20]
-                        .copy_from_slice(raw_proof.get(idx..idx + 0x20).unwrap());
+                        .copy_from_slice(&load_from_proof(raw_proof, idx as u32).unwrap());
+
+                    println!(
+                        "Case 0: Wrote {:?} to 0x{:x?}",
+                        to_hex_string(&load_from_proof(raw_proof, idx as u32).unwrap()),
+                        mstore_ptr
+                    );
 
                     // Move to the next expression
                     expressions_word >>= 16;
@@ -316,13 +369,20 @@ fn expression_evals_packed(
                 0x01 => {
                     expressions_word >>= 8;
                     // Load the memory ptr from the expression, which come from the 2nd and 3rd least significant bytes
-                    let idx = lsb16(&expressions_word) - PROOF_OFFSET;
+                    let idx = lsb16(&expressions_word);
                     let temp = &mload(memory, idx as u32)
                         .unwrap()
                         .into_fr()
                         .neg_in_place()
                         .into_be_bytes32();
                     memory[mstore_ptr..mstore_ptr + 0x20].copy_from_slice(temp);
+
+                    println!(
+                        "Case 1: Wrote {:?} to 0x{:x?}",
+                        to_hex_string(temp),
+                        mstore_ptr
+                    );
+
                     // Move to the next expression
                     expressions_word >>= 16;
                 }
@@ -340,6 +400,13 @@ fn expression_evals_packed(
 
                     memory[mstore_ptr..mstore_ptr + 0x20]
                         .copy_from_slice(&(lhs + rhs).into_be_bytes32());
+
+                    println!(
+                        "Case 2: Wrote {:?} to 0x{:x?}",
+                        to_hex_string(&(lhs + rhs).into_be_bytes32()),
+                        mstore_ptr
+                    );
+
                     // Move to the next expression
                     expressions_word >>= 32;
                 }
@@ -357,6 +424,13 @@ fn expression_evals_packed(
 
                     memory[mstore_ptr..mstore_ptr + 0x20]
                         .copy_from_slice(&(lhs * rhs).into_be_bytes32());
+
+                    println!(
+                        "Case 3: Wrote {:?} to 0x{:x?}",
+                        to_hex_string(&(lhs * rhs).into_be_bytes32()),
+                        mstore_ptr
+                    );
+
                     // Move to the next expression
                     expressions_word >>= 32;
                 }
@@ -440,6 +514,7 @@ fn z_evals(
     y: Fr,
     mut quotient_eval_numer: Fr,
 ) -> Fr {
+    println!("z_evals invoked!");
     let mut num_words = lsb16(num_words_packed);
 
     // Initialize the free static memory pointer to store the column evals.
@@ -447,6 +522,12 @@ fn z_evals(
     let idx = ptr as usize + 0x20;
     let val = ptr + 0x40;
     memory[idx..idx + 0x20].copy_from_slice(&val.into_u256().into_be_bytes32());
+
+    println!(
+        "Wrote: {} to 0x{:x?}",
+        to_hex_string(&val.into_u256().into_be_bytes32()),
+        idx
+    );
 
     // Iterate through the tuple window length ( permutation_z_evals_len.len() - 1 ) offset by one word.
     while permutation_z_evals_ptr < perm_z_last_ptr {
@@ -507,6 +588,8 @@ fn col_evals(
     permutation_z_evals_ptr: usize,
     theta_mptr: usize,
 ) -> Result<(), VerifyError> {
+    println!("col_evals invoked!");
+
     let gamma = mload(memory, theta_mptr as u32 + 0x40)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to load gamma from memory. Cause: {e}"),
@@ -578,6 +661,12 @@ fn col_evals(
             let idx = fmp as usize;
             let val = DELTA * mload(memory, fmp).unwrap().into_fr();
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+            println!(
+                "Wrote {} at 0x{:x?}",
+                to_hex_string(&val.into_be_bytes32()),
+                idx
+            );
         }
         z = mload(memory, (permutation_z_evals_ptr + j + 0x20) as u32)
             .map_err(|e| VerifyError::InvalidProofError {
@@ -592,8 +681,20 @@ fn col_evals(
     let val = left_sub_right - left_sub_right * (l_last + l_blind);
     memory[fsm_ptr..fsm_ptr + 0x20].copy_from_slice(&val.into_be_bytes32());
 
+    println!(
+        "Wrote {} at 0x{:x?}",
+        to_hex_string(&val.into_be_bytes32()),
+        fsm_ptr
+    );
+
     let idx = fmp as usize + 0x20;
     memory[idx..idx + 0x20].copy_from_slice(&(fsm_ptr + 0x20).into_u256().into_be_bytes32());
+
+    println!(
+        "Wrote {} at 0x{:x?}",
+        to_hex_string(&(fsm_ptr + 0x20).into_u256().into_be_bytes32()),
+        idx
+    );
 
     Ok(())
 }
@@ -607,6 +708,8 @@ fn lookup_expr_evals_packed(
     expressions_word: U256,
     mv: bool,
 ) -> Result<(usize, U256, Fr), ()> {
+    println!("lookup_expr_evals_packed invoked!");
+
     // expression evaluation.
     let (ret0, ret1, ret2) = expression_evals_packed(
         memory,
@@ -639,6 +742,8 @@ fn mv_lookup_evals(
     mut quotient_eval_numer: Fr,
     y: Fr,
 ) -> Result<(usize, Fr, Fr), ()> {
+    println!("mv_lookup_evals invoked!");
+
     // load the free memory pointer
     let fmp =
         u32_from_be_tail(&mload(memory, 0x40).expect("Should be able to load fmp at this point."));
@@ -690,6 +795,12 @@ fn mv_lookup_evals(
         // store ident in free static memory
         // mstore(j, ident)
         memory[j..j + 0x20].copy_from_slice(&ident.into_be_bytes32());
+
+        println!(
+            "Wrote: {} at 0x{:x?}",
+            to_hex_string(&ident.into_be_bytes32()),
+            j
+        );
     }
     // let lhs;
     let mut rhs = Fr::ZERO;
@@ -751,6 +862,8 @@ fn lookup_evals(
     mut quotient_eval_numer: Fr,
     y: Fr,
 ) -> Result<(usize, Fr, Fr), ()> {
+    println!("lookup_evals invoked!");
+
     // load the free memory pointer
     let fmp = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to load fmp from memory at this point."),
@@ -864,6 +977,8 @@ fn point_rots(
     omega: Fr,
     vka_end: usize,
 ) -> Result<(Fr, usize), ()> {
+    println!("point_rots invoked!");
+
     // Extract the 32 LSG bits (4 bytes) from the pcs_computations word to get the max rot
     let values_max_rot = lsb8(&pcs_computations);
     pcs_computations >>= 8;
@@ -873,6 +988,12 @@ fn point_rots(
             // mstore(add(vka_end, value), x_pow_of_omega)
             let idx = vka_end + value;
             memory[idx..idx + 0x20].copy_from_slice(&x_pow_of_omega.into_be_bytes32());
+
+            println!(
+                "Wrote {} at 0x{:x?}",
+                to_hex_string(&x_pow_of_omega.into_be_bytes32()),
+                idx
+            );
         }
         if i == values_max_rot - 1 {
             break;
@@ -904,6 +1025,17 @@ fn ec_mul_acc<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
     memory[(vka_end + 0x20)..(vka_end + 0x40)]
         .copy_from_slice(&res.y().expect("Should succeed").into_be_bytes32());
 
+    println!(
+        "ec_mul_acc stored x = {} at 0x{:x?}",
+        to_hex_string(&res.x().expect("Should succeed").into_be_bytes32()),
+        vka_end
+    );
+    println!(
+        "ec_mul_acc stored y = {} at 0x{:x?}",
+        to_hex_string(&res.y().expect("Should succeed").into_be_bytes32()),
+        vka_end + 0x20
+    );
+
     Ok(())
 }
 
@@ -929,6 +1061,17 @@ fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
         .copy_from_slice(&res.x().expect("Should succeed").into_be_bytes32());
     memory[(vka_end + 0x20)..(vka_end + 0x40)]
         .copy_from_slice(&res.y().expect("Should succeed").into_be_bytes32());
+
+    println!(
+        "ec_add_acc stored x = {} at 0x{:x?}",
+        to_hex_string(&res.x().expect("Should succeed").into_be_bytes32()),
+        vka_end
+    );
+    println!(
+        "ec_add_acc stored y = {} at 0x{:x?}",
+        to_hex_string(&res.y().expect("Should succeed").into_be_bytes32()),
+        vka_end + 0x20
+    );
 
     Ok(())
 }
@@ -958,6 +1101,17 @@ fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
     memory[(vka_end + 0xa0)..(vka_end + 0xc0)]
         .copy_from_slice(&res.y().expect("Should succeed").into_be_bytes32());
 
+    println!(
+        "ec_add_tmp stored x = {} at 0x{:x?}",
+        to_hex_string(&res.x().expect("Should succeed").into_be_bytes32()),
+        vka_end
+    );
+    println!(
+        "ec_add_tmp stored y = {} at 0x{:x?}",
+        to_hex_string(&res.y().expect("Should succeed").into_be_bytes32()),
+        vka_end + 0x20
+    );
+
     Ok(())
 }
 
@@ -979,10 +1133,23 @@ fn ec_mul_tmp<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
     memory[(vka_end + 0xa0)..(vka_end + 0xc0)]
         .copy_from_slice(&res.y().expect("Should succeed").into_be_bytes32());
 
+    println!(
+        "ec_mul_tmp stored x = {} at 0x{:x?}",
+        to_hex_string(&res.x().expect("Should succeed").into_be_bytes32()),
+        vka_end
+    );
+    println!(
+        "ec_mul_tmp stored y = {} at 0x{:x?}",
+        to_hex_string(&res.y().expect("Should succeed").into_be_bytes32()),
+        vka_end + 0x20
+    );
+
     Ok(())
 }
 
 fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256) -> U256 {
+    println!("coeff_computations invoked!");
+
     let coeff_len = lsb8(&coeff_len_data);
     let ret = coeff_len_data >> 8;
 
@@ -999,6 +1166,12 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
                 .unwrap()
                 .into_fr();
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+            println!(
+                "Case 0x01: Wrote {} at 0x{:?}",
+                to_hex_string(&val.into_be_bytes32()),
+                idx
+            );
         }
         _ => {
             let mut coeff = Fr::ONE;
@@ -1032,6 +1205,12 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
                 offset_base += offset_aggr as u32;
                 let idx = lsb16(&(coeff_data >> offset_base)) + fmp as usize;
                 memory[idx..idx + 0x20].copy_from_slice(&coeff.into_be_bytes32());
+
+                println!(
+                    "Case _ (default): Wrote {} at 0x{:?}",
+                    to_hex_string(&coeff.into_be_bytes32()),
+                    idx
+                );
             }
         }
     }
@@ -1048,6 +1227,8 @@ fn r_evals_computation(
     quotient_eval: Fr,
     coeff_ptr: u32,
 ) -> Result<(Fr, usize), String> {
+    println!("r_evals_computation invoked!");
+
     let mut r_evals_data = mload(memory, r_evals_data_ptr)
         .map_err(|e| format!("r_evals_computation failed. Cause: {e}"))?
         .into_u256();
@@ -1096,6 +1277,8 @@ fn single_rot_set(
     quotient_eval: Fr,
     coeff_ptr: u32,
 ) -> Result<(Fr, usize), String> {
+    println!("single_rot_set invoked!");
+
     let coeff = mload(memory, coeff_ptr)
         .map_err(|e| format!("single_rot_set failed. Cause: {e}"))?
         .into_fr();
@@ -1154,6 +1337,8 @@ fn multi_rot_set(
     zeta: Fr,
     coeff_ptr: u32,
 ) -> Result<(Fr, usize), String> {
+    println!("multi_rot_set invoked!");
+
     let mut r_eval = Fr::ZERO;
     for i in 0..num_words {
         while !r_evals_data.is_zero() {
@@ -1180,6 +1365,7 @@ fn multi_rot_set(
     Ok((r_eval, ptr as usize))
 }
 
+// Initial phase of computations in preparation for the pairing check.
 fn pairing_input_computations_first<H: CurveHooks>(
     memory: &mut [u8],
     raw_proof: &[u8],
@@ -1188,6 +1374,8 @@ fn pairing_input_computations_first<H: CurveHooks>(
     mut data: U256,
     theta_mptr: u32,
 ) -> Result<(), ()> {
+    println!("pairing_input_computations_first invoked!");
+
     let fmp = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to read fmp from memory at this point."),
     );
@@ -1196,11 +1384,15 @@ fn pairing_input_computations_first<H: CurveHooks>(
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
+    println!("Wrote {} to 0x{:x?}", to_hex_string(&bytes), idx);
+
     data >>= 16;
     // mstore(add(0x20, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
     let idx = 0x20 + fmp as usize;
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    println!("Wrote {} to 0x{:x?}", to_hex_string(&bytes), idx);
 
     data >>= 16;
     for _ in (0..len).step_by(0x20) {
@@ -1330,6 +1522,7 @@ fn pairing_input_computations_first<H: CurveHooks>(
     Ok(())
 }
 
+// Perform subsequent computations in preparation for the pairing check.
 fn pairing_input_computations<H: CurveHooks>(
     memory: &mut [u8],
     raw_proof: &[u8],
@@ -1338,6 +1531,8 @@ fn pairing_input_computations<H: CurveHooks>(
     mut data: U256,
     theta_mptr: u32,
 ) -> Result<(), ()> {
+    println!("pairing_input_computations invoked!");
+
     let fmp = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to read fmp from memory at this point."),
     );
@@ -1346,11 +1541,15 @@ fn pairing_input_computations<H: CurveHooks>(
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
+    println!("Wrote {} to 0x{:x?}", to_hex_string(&bytes), idx);
+
     data >>= 16;
     // mstore(add(0xa0, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
     let idx = 0xa0 + fmp as usize;
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    println!("Wrote {} to 0x{:x?}", to_hex_string(&bytes), idx);
 
     data >>= 16;
     for _ in (0..len).step_by(0x20) {
@@ -1480,6 +1679,8 @@ fn pairing_input_computations<H: CurveHooks>(
 
 // Utility function for batch-inverting a chunk of `Fr` elements in memory.
 fn batch_invert_in_memory(memory: &mut [u8], start: u32, end: u32) -> Result<(), String> {
+    println!("batch_invert_in_memory invoked!");
+
     // TODO: Error handling...
     if end <= start {
         return Err(format!(
@@ -1511,6 +1712,12 @@ fn batch_invert_in_memory(memory: &mut [u8], start: u32, end: u32) -> Result<(),
     for i in 0..inverses.len() {
         memory[(start + i * 0x20)..start + (i + 1) * 0x20]
             .copy_from_slice(&inverses[i].into_be_bytes32()); // TODO: THIS CAN FAIL... (IndexOutOfBounds)
+
+        println!(
+            "Write inverse = {} at 0x{:x?}",
+            to_hex_string(&inverses[i].into_be_bytes32()),
+            (start + i * 0x20)
+        );
     }
 
     Ok(())
@@ -1522,6 +1729,8 @@ fn compute_lagrange_and_instance_evaluation(
     pubs: &Public,
     theta_mptr: usize,
 ) -> Result<(), VerifyError> {
+    println!("compute_lagrange_and_instance_evaluation invoked!");
+
     // Calculate vanishing polynomial numerator
     let k = mload_u32(memory, (VKA_OFFSET + 0x00a0 + MEMORY_OFFSET) as u32).map_err(|e| {
         VerifyError::KeyError {
@@ -1581,12 +1790,25 @@ fn compute_lagrange_and_instance_evaluation(
 
     while mptr < mptr_end {
         memory[mptr..mptr + 32].copy_from_slice(&(x - pow_of_omega).into_be_bytes32()); // mstore(mptr, addmod(x, sub(R, pow_of_omega),R))
+
+        println!(
+            "Write {} at 0x{:x?}",
+            to_hex_string(&(x - pow_of_omega).into_be_bytes32()),
+            mptr
+        );
+
         pow_of_omega *= omega;
         mptr += 0x20;
     }
 
     let x_n_minus_1 = x_n - Fr::ONE;
     memory[mptr_end..mptr_end + 32].copy_from_slice(&x_n_minus_1.into_be_bytes32()); // mstore(mptr_end, x_n_minus_1)
+
+    println!(
+        "Write {} at 0x{:x?}",
+        to_hex_string(&x_n_minus_1.into_be_bytes32()),
+        mptr_end
+    );
 
     batch_invert_in_memory(memory, x_n_mptr as u32, mptr_end as u32 + 0x20);
 
@@ -1611,6 +1833,13 @@ fn compute_lagrange_and_instance_evaluation(
         memory[mptr..mptr + 0x20].copy_from_slice(
             &(l_i_common * zeta_minus_omega_i_inv * pow_of_omega).into_be_bytes32(),
         );
+
+        println!(
+            "Write {} at 0x{:x?}",
+            to_hex_string(&(l_i_common * zeta_minus_omega_i_inv * pow_of_omega).into_be_bytes32()),
+            mptr
+        );
+
         pow_of_omega *= omega;
     }
 
@@ -1662,21 +1891,62 @@ fn compute_lagrange_and_instance_evaluation(
 
     // mstore(x_n_mptr, x_n)
     memory[x_n_mptr..x_n_mptr + 0x20].copy_from_slice(&x_n.into_be_bytes32());
+
+    println!(
+        "Write {} at 0x{:x?}",
+        to_hex_string(&x_n.into_be_bytes32()),
+        x_n_mptr
+    );
+
     // mstore(add(theta_mptr, 0x1a0), x_n_minus_1_inv)
     let mut start = theta_mptr + 0x1a0;
     memory[start..start + 0x20].copy_from_slice(&x_n_minus_1_inv.into_be_bytes32());
+
+    println!(
+        "Write {} at 0x{:x?}",
+        to_hex_string(&x_n_minus_1_inv.into_be_bytes32()),
+        start
+    );
+
     // mstore(add(theta_mptr, 0x1c0), l_last)
     start += 0x20;
     memory[start..start + 0x20].copy_from_slice(&l_last.into_be_bytes32());
+
+    println!(
+        "Write {} at 0x{:x?}",
+        to_hex_string(&l_last.into_be_bytes32()),
+        start
+    );
+
     // mstore(add(theta_mptr, 0x1e0), l_blind)
     start += 0x20;
     memory[start..start + 0x20].copy_from_slice(&l_blind.into_be_bytes32());
+
+    println!(
+        "Write {} at 0x{:x?}",
+        to_hex_string(&l_blind.into_be_bytes32()),
+        start
+    );
+
     // mstore(add(theta_mptr, 0x200), l_0)
     start += 0x20;
     memory[start..start + 0x20].copy_from_slice(&l_0.into_be_bytes32());
+
+    println!(
+        "Write {} at 0x{:x?}",
+        to_hex_string(&l_0.into_be_bytes32()),
+        start
+    );
+
     // mstore(add(theta_mptr, 0x220), instance_eval)
     start += 0x20;
     memory[start..start + 0x20].copy_from_slice(&instance_eval.into_be_bytes32());
+
+    println!(
+        "Write {} at 0x{:x?}",
+        to_hex_string(&instance_eval.into_be_bytes32()),
+        start
+    );
 
     Ok(())
 }
@@ -1689,6 +1959,8 @@ fn perform_gate_computations(
     mut quotient_eval_numer: Fr,
     y: Fr,
 ) -> Result<Fr, VerifyError> {
+    println!("perform_gate_computations invoked!");
+
     let gate_computations_len_offset = VKA_OFFSET + 0x0340 + MEMORY_OFFSET;
     let (mut computations_ptr, computations_len) =
         soa_layout_metadata(memory, gate_computations_len_offset).map_err(|e| {
@@ -1765,6 +2037,8 @@ fn perform_permutation_computations(
     mut quotient_eval_numer: Fr,
     y: Fr,
 ) -> Result<Fr, VerifyError> {
+    println!("perform_permutation_computations invoked!");
+
     let mut permutation_z_evals_ptr =
         mload_u32(memory, 0x0360 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32).map_err(|e| {
             VerifyError::KeyError {
@@ -1855,6 +2129,12 @@ fn perform_permutation_computations(
                 })?.into_fr();
         memory[vka_end..vka_end + 0x20].copy_from_slice(&(lhs * rhs).into_be_bytes32());
 
+        println!(
+            "Wrote: {} at 0x{:x?}",
+            to_hex_string(&(lhs * rhs).into_be_bytes32()),
+            vka_end
+        );
+
         quotient_eval_numer = z_evals(
             memory,
             raw_proof,
@@ -1881,31 +2161,68 @@ fn perform_lookup_computations(
     mut quotient_eval_numer: Fr,
     y: Fr,
 ) -> Result<Fr, VerifyError> {
+    println!("perform_lookup_computations invoked!");
+
     // mstore(vka_end, mload(add(theta_mptr, 0x1C0)))
     let value = &mload(memory, theta_mptr as u32 + 0x1c0).map_err(|e| VerifyError::KeyError {
         message: format!("Failed to read l_last from memory. Cause: {e}"),
     })?;
     memory[vka_end..vka_end + 0x20].copy_from_slice(value); // l_last
+
+    println!(
+        "Wrote l_last = {} at 0x{:x?}",
+        to_hex_string(value),
+        vka_end
+    );
+
     // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x200)))
     let value = &mload(memory, theta_mptr as u32 + 0x200).map_err(|e| VerifyError::KeyError {
         message: format!("Failed to read l_0 from memory. Cause: {e}"),
     })?;
     memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(value); // l_0
+
+    println!(
+        "Wrote l_0 = {} at 0x{:x?}",
+        to_hex_string(value),
+        vka_end + 0x20
+    );
+
     // mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x1E0)))
     let value = &mload(memory, 0x1e0).map_err(|e| VerifyError::KeyError {
         message: format!("Failed to read l_blind from memory. Cause: {e}"),
     })?;
     memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(value); // l_blind
+
+    println!(
+        "Wrote l_blind = {} at 0x{:x?}",
+        to_hex_string(value),
+        vka_end + 0x40
+    );
+
     // mstore(add(0x60, vka_end), mload(theta_mptr))
     let value = &mload(memory, theta_mptr as u32).map_err(|e| VerifyError::KeyError {
         message: format!("Failed to read theta from memory. Cause: {e}"),
     })?;
     memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(value); // theta
+
+    println!(
+        "Wrote theta = {} at 0x{:x?}",
+        to_hex_string(value),
+        vka_end + 0x60
+    );
+
     // mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x20)))
     let value = &mload(memory, theta_mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError {
         message: format!("Failed to read beta from memory. Cause: {e}"),
     })?;
     memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(value); // beta
+
+    println!(
+        "Wrote beta = {} at 0x{:x?}",
+        to_hex_string(value),
+        vka_end + 0x80
+    );
+
     let (mut evals_ptr, meta_data) =
         soa_layout_metadata(memory, 0x380 + VKA_OFFSET + MEMORY_OFFSET).map_err(|e| {
             VerifyError::KeyError {
@@ -1938,6 +2255,13 @@ fn perform_lookup_computations(
                 // mstore(add(0xA0, vka_end), mload(add(theta_mptr, 0x40)))
                 let bytes = mload(memory, theta_mptr as u32 + 0x40).unwrap();
                 memory[vka_end..vka_end + 0xa0].copy_from_slice(&bytes); // gamma
+
+                println!(
+                    "Case 0x1: Wrote gamma = {} at 0x{:x?}",
+                    to_hex_string(&bytes),
+                    vka_end
+                );
+
                 while evals_ptr < end_ptr as usize {
                     (evals_ptr, table, quotient_eval_numer) =
                         lookup_evals(memory, raw_proof, table, evals_ptr, quotient_eval_numer, y)
@@ -1962,6 +2286,8 @@ fn perform_quotient_evaluation(
     vka_end: usize,
     theta_mptr: usize,
 ) -> Result<(), VerifyError> {
+    println!("perform_quotient_evaluation invoked!");
+
     let mut quotient_eval_numer = Fr::ONE;
     let y = mload(memory, theta_mptr as u32 + 0x60)
         .map_err(|e| VerifyError::KeyError {
@@ -1995,6 +2321,12 @@ fn perform_quotient_evaluation(
     let val = quotient_eval_numer * mload(memory, theta_mptr as u32 + 0x1a0).map_err(|e| VerifyError::KeyError { message: format!("Failed to read scalar from memory at the end of permutation computations phase. Cause: {e}" )})?.into_fr();
     memory[idx..(idx + 0x20)].copy_from_slice(&val.into_be_bytes32());
 
+    println!(
+        "Wrote {} at 0x{:x?}",
+        to_hex_string(&val.into_be_bytes32()),
+        idx
+    );
+
     Ok(())
 }
 
@@ -2005,6 +2337,8 @@ fn compute_quotient_commitment<H: CurveHooks>(
     vka_end: usize,
     theta_mptr: usize,
 ) -> Result<(), VerifyError> {
+    println!("compute_quotient_commitment invoked!");
+
     let first_quotient_x_cptr = 0x0320 + VKA_OFFSET + MEMORY_OFFSET;
     let last_quotient_x_cptr = 0x0300 + VKA_OFFSET + MEMORY_OFFSET;
     let bytes = load_from_proof(
@@ -2021,6 +2355,8 @@ fn compute_quotient_commitment<H: CurveHooks>(
     // mstore(vka_end, calldataload(mload(0x03a0)))
     memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
 
+    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), vka_end);
+
     // mstore(add(0x20, vka_end), calldataload(add(mload(0x03a0), 0x20)))
     let bytes = load_from_proof(
         raw_proof,
@@ -2034,6 +2370,12 @@ fn compute_quotient_commitment<H: CurveHooks>(
         message: format!("Unable to load last_quotient_y from proof. Cause: {e}"),
     })?;
     memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
+
+    println!(
+        "Wrote: {} at 0x{:x?}",
+        to_hex_string(&bytes),
+        vka_end + 0x20
+    );
 
     let x_n = mload(memory, theta_mptr as u32 + 0x180)
         .map_err(|e| VerifyError::KeyError {
@@ -2073,9 +2415,21 @@ fn compute_quotient_commitment<H: CurveHooks>(
     let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end during the quotient commitment computation phase. Cause: {e}") })?;
     memory[(theta_mptr + 0x260)..(theta_mptr + 0x260 + 0x20)].copy_from_slice(&bytes);
 
+    println!(
+        "Wrote: {} at 0x{:x?}",
+        to_hex_string(&bytes),
+        theta_mptr + 0x260
+    );
+
     // mstore(add(theta_mptr, 0x280), mload(add(0x20, vka_end)))
     let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end + 0x20 during the quotient commitment computation phase. Cause: {e}") })?;
     memory[(theta_mptr + 0x280)..(theta_mptr + 0x280 + 0x20)].copy_from_slice(&bytes);
+
+    println!(
+        "Wrote: {} at 0x{:x?}",
+        to_hex_string(&bytes),
+        theta_mptr + 0x280
+    );
 
     Ok(())
 }
@@ -2087,6 +2441,8 @@ fn perform_point_computations(
     theta_mptr: usize,
     mut pcs_ptr: usize,
 ) -> Result<usize, VerifyError> {
+    println!("perform_point_computations invoked!");
+
     let mut point_computations = mload(memory, pcs_ptr as u32)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to load point_computations from memory. Cause: {e}"),
@@ -2128,6 +2484,13 @@ fn perform_point_computations(
     // mstore(add(and(point_computations, PTR_BITMASK), vka_end), x)
     let idx = vka_end + lsb16(&point_computations);
     memory[idx..idx + 0x20].copy_from_slice(&x.into_be_bytes32());
+
+    println!(
+        "Wrote: {} at 0x{:x?}",
+        to_hex_string(&x.into_be_bytes32()),
+        idx
+    );
+
     x_pow_of_omega = x * omega_inv;
     point_computations >>= 16;
     (_, pcs_ptr) = point_rots(
@@ -2152,6 +2515,8 @@ fn perform_vanishing_computations(
     theta_mptr: usize,
     mut pcs_ptr: usize,
 ) -> Result<usize, VerifyError> {
+    println!("perform_vanishing_computations invoked!");
+
     let mu = mload(memory, theta_mptr as u32 + 0xE0)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to load mu from memory. Cause: {e}"),
@@ -2166,6 +2531,12 @@ fn perform_vanishing_computations(
 
     // mstore(add(0x20, vka_end), 1)
     memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&U256::one().into_be_bytes32());
+
+    println!(
+        "Wrote: {} at 0x{:x?}",
+        to_hex_string(&U256::one().into_be_bytes32()),
+        vka_end + 0x20
+    );
 
     let mut mptr = lsb16(&vanishing_computations);
     vanishing_computations >>= 16;
@@ -2183,6 +2554,12 @@ fn perform_vanishing_computations(
             .into_fr();
         // mstore(add(vka_end, mptr), val);
         memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+        println!(
+            "Wrote: {} at 0x{:x?}",
+            to_hex_string(&val.into_be_bytes32()),
+            idx
+        );
 
         mptr += 0x20;
         point_mptr += 0x20;
@@ -2217,6 +2594,12 @@ fn perform_vanishing_computations(
     // mstore(diff_ptr, s)
     memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&s.into_be_bytes32());
 
+    println!(
+        "Wrote: {} at 0x{:x?}",
+        to_hex_string(&s.into_be_bytes32()),
+        diff_ptr
+    );
+
     vanishing_computations >>= 16;
     let mut diff: Fr;
     let sets_len = lsb16(&vanishing_computations);
@@ -2247,9 +2630,21 @@ fn perform_vanishing_computations(
         // mstore(diff_ptr, diff)
         memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&diff.into_be_bytes32());
 
+        println!(
+            "Wrote: {} at 0x{:x?}",
+            to_hex_string(&diff.into_be_bytes32()),
+            diff_ptr
+        );
+
         if i == 0 {
             // mstore(vka_end, diff)
             memory[vka_end..vka_end + 0x20].copy_from_slice(&diff.into_be_bytes32());
+
+            println!(
+                "Wrote: {} at 0x{:x?}",
+                to_hex_string(&diff.into_be_bytes32()),
+                vka_end
+            );
         }
         pcs_ptr += 0x20;
         vanishing_computations = mload(memory, pcs_ptr as u32)
@@ -2264,6 +2659,8 @@ fn perform_vanishing_computations(
 
 // Performs coefficient computations. Returns updated pcs_ptr.
 fn perform_coeff_computations(memory: &mut [u8], mut pcs_ptr: usize) -> Result<usize, VerifyError> {
+    println!("perform_coeff_computations invoked!");
+
     let mut coeff_len_data = mload(memory, pcs_ptr as u32)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to load coeff_len_data from memory. Cause: {e}"),
@@ -2305,6 +2702,8 @@ fn perform_normalized_coeff_computations(
     vka_end: usize,
     mut pcs_ptr: usize,
 ) -> Result<usize, VerifyError> {
+    println!("perform_normalized_coeff_computations invoked!");
+
     let mut norm_coeff_data = mload(memory, pcs_ptr as u32)
                 .map_err(|e| VerifyError::KeyError {
                     message: format!("Unable to load norm_coeff_data from memory during normalized_coeff_computations. Cause: {e}"),
@@ -2330,6 +2729,12 @@ fn perform_normalized_coeff_computations(
     // mstore(mptr0, diff_0_inv)
     memory[mptr0..mptr0 + 0x20].copy_from_slice(&diff_0_inv.into_be_bytes32());
 
+    println!(
+        "Wrote: {} at -x{:x?}",
+        to_hex_string(&diff_0_inv.into_be_bytes32()),
+        mptr0
+    );
+
     let mptr_end = mptr0 + lsb16(&norm_coeff_data);
     for mptr in ((mptr0 + 0x20)..mptr_end).step_by(0x20) {
         // mstore(mptr, mulmod(mload(mptr), diff_0_inv, R))
@@ -2337,6 +2742,12 @@ fn perform_normalized_coeff_computations(
                     message: format!("Unable to load scalar from memory during normalized_coeff_computations. Cause: {e}"),
                 })?.into_fr() * diff_0_inv;
         memory[mptr..mptr + 0x20].copy_from_slice(&val.into_be_bytes32());
+
+        println!(
+            "Wrote: {} at -x{:x?}",
+            to_hex_string(&val.into_be_bytes32()),
+            mptr
+        );
     }
     pcs_ptr += 0x20;
 
@@ -2352,6 +2763,8 @@ fn perform_r_evals_computations(
     mut pcs_ptr: usize,
     mut coeff_ptr: usize,
 ) -> Result<usize, VerifyError> {
+    println!("perform_r_evals_computations invoked!");
+
     let mut r_evals_meta_data = mload(memory, pcs_ptr as u32)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to load r_evals_meta_data from memory. Cause: {e}"),
@@ -2406,6 +2819,12 @@ fn perform_r_evals_computations(
             // mstore(r_eval_mptr, r_eval)
             memory[r_eval_mptr..r_eval_mptr + 0x20].copy_from_slice(&r_eval.into_be_bytes32());
 
+            println!(
+                "Wrote: {} at 0x{:x?}",
+                to_hex_string(&r_eval.into_be_bytes32()),
+                r_eval_mptr
+            );
+
             r_eval_mptr += 0x20;
         }
         r_evals_meta_data = mload(memory, i as u32 + 0x20)
@@ -2425,6 +2844,8 @@ fn perform_coeff_sums_computation(
     vka_end: usize,
     mut pcs_ptr: usize,
 ) -> Result<usize, VerifyError> {
+    println!("perform_coeff_sums_computation invoked!");
+
     let mut coeff_sums_data = mload(memory, pcs_ptr as u32)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to load coeff_sums_data from memory. Cause: {e}"),
@@ -2462,6 +2883,12 @@ fn perform_coeff_sums_computation(
             // mstore(idx, sum)
             memory[idx..idx + 0x20].copy_from_slice(&sum.into_be_bytes32());
 
+            println!(
+                "Wrote: {} at 0x{:x?}",
+                to_hex_string(&sum.into_be_bytes32()),
+                idx
+            );
+
             coeff_sums_data >>= 16;
         }
         coeff_sums_data = mload(memory, i as u32 + 0x20)
@@ -2482,6 +2909,8 @@ fn perform_r_eval_computation(
     theta_mptr: usize,
     mut pcs_ptr: usize,
 ) -> Result<usize, VerifyError> {
+    println!("perform_r_eval_computation invoked!");
+
     let mut r_eval_data = mload(memory, pcs_ptr as u32)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to load r_eval_data from memory. Cause: {e}"),
@@ -2501,6 +2930,8 @@ fn perform_r_eval_computation(
             ),
         })?;
         memory[mptr..mptr + 0x20].copy_from_slice(&bytes);
+
+        println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), mptr);
 
         mptr += 0x20;
         sum_mptr += 0x20;
@@ -2556,6 +2987,12 @@ fn perform_r_eval_computation(
     }
     memory[idx..idx + 0x20].copy_from_slice(&r_eval.into_be_bytes32());
 
+    println!(
+        "Wrote: {} at 0x{:x?}",
+        to_hex_string(&r_eval.into_be_bytes32()),
+        idx
+    );
+
     pcs_ptr += 0x20;
 
     Ok(pcs_ptr)
@@ -2569,6 +3006,8 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     theta_mptr: usize,
     mut pcs_ptr: usize,
 ) -> Result<(), VerifyError> {
+    println!("perform_pairing_input_computations invoked!");
+
     let mut nu = mload(memory, theta_mptr as u32 + 0xC0)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to load nu from memory. Cause: {e}"),
@@ -2672,6 +3111,8 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     })?;
     memory[idx2..idx2 + 0x20].copy_from_slice(&g1_x_bytes);
 
+    println!("Wrote: {} at 0x{:x?}", to_hex_string(&g1_x_bytes), idx2);
+
     // mstore(add(0xa0, vka_end), mload(0x0280))
     let idx1 = 0x01e0 + VKA_OFFSET + MEMORY_OFFSET; // g1_y index
     let idx2 = vka_end + 0xa0;
@@ -2679,6 +3120,8 @@ fn perform_pairing_input_computations<H: CurveHooks>(
         message: format!("Unable to load g1_y_bytes from memory. Cause: {e}"),
     })?;
     memory[idx2..idx2 + 0x20].copy_from_slice(&g1_y_bytes);
+
+    println!("Wrote: {} at 0x{:x?}", to_hex_string(&g1_y_bytes), idx2);
 
     let s = -mload(memory, theta_mptr as u32 + 0x2a0)
         .map_err(|e| VerifyError::KeyError {
@@ -2715,6 +3158,8 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
+    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), idx);
+
     ec_points_cptr_packed >>= 16;
 
     // mstore(add(0xa0, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
@@ -2727,6 +3172,8 @@ fn perform_pairing_input_computations<H: CurveHooks>(
         }
     })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
+
+    println!("Wrote: {} at 0x{:x?}", to_hex_string(&bytes), idx);
 
     ec_points_cptr_packed >>= 16;
 
@@ -2776,9 +3223,21 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     let idx = 0x80 + vka_end;
     memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
 
+    println!(
+        "Wrote w_prime_x = {} at 0x{:x?}",
+        to_hex_string(&w_prime_x),
+        idx
+    );
+
     // mstore(add(0xa0, vka_end), w_prime_y)
     let idx = 0xa0 + vka_end;
     memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
+
+    println!(
+        "Wrote w_prime_y = {} at 0x{:x?}",
+        to_hex_string(&w_prime_y),
+        idx
+    );
 
     let s = mload(memory, theta_mptr as u32 + 0xe0)
         .map_err(|e| VerifyError::KeyError {
@@ -2818,6 +3277,12 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
+    println!(
+        "Wrote w_prime_y = {} at 0x{:x?}",
+        to_hex_string(&bytes),
+        idx
+    );
+
     // mstore(add(theta_mptr, 0x2E0), mload(add(0x20, vka_end)))
     let idx = theta_mptr + 0x2e0;
     let bytes = mload(memory, 0x20 + vka_end as u32).map_err(|e| VerifyError::KeyError {
@@ -2827,13 +3292,31 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
+    println!(
+        "Wrote w_prime_y = {} at 0x{:x?}",
+        to_hex_string(&bytes),
+        idx
+    );
+
     // mstore(add(theta_mptr, 0x300), w_prime_x)
     let idx = theta_mptr + 0x300;
     memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
 
+    println!(
+        "Wrote w_prime_x = {} at 0x{:x?}",
+        to_hex_string(&w_prime_x),
+        idx
+    );
+
     // mstore(add(theta_mptr, 0x320), w_prime_y)
     let idx = theta_mptr + 0x320;
     memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
+
+    println!(
+        "Wrote w_prime_y = {} at 0x{:x?}",
+        to_hex_string(&w_prime_y),
+        idx
+    );
 
     Ok(())
 }
@@ -2845,6 +3328,8 @@ fn compute_pairing_lhs_and_rhs<H: CurveHooks>(
     vka_end: usize,
     theta_mptr: usize,
 ) -> Result<(), VerifyError> {
+    println!("compute_pairing_lhs_and_rhs invoked!");
+
     let mut pcs_ptr =
         mload_u32(memory, 0x03a0 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32).map_err(|e| {
             VerifyError::KeyError {
@@ -2873,12 +3358,17 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
     vka_end: usize,
     theta_mptr: usize,
 ) -> Result<(), VerifyError> {
+    println!("random_linear_combine_with_accumulator invoked!");
+
     let has_accumulator = !mload(memory, 0x0140 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
         .map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read has_accumulator field from VKA. Cause: {e}"),
         })?
         .into_u256()
         .is_zero();
+
+    println!("has_accumulator = {}", has_accumulator);
+
     if has_accumulator {
         //     mstore(add(0x00, vka_end), mload(add(theta_mptr, 0x100)))
         let mut bytes =
@@ -3023,6 +3513,8 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
 
 // Performs the final pairing check.
 fn pairing_check<H: CurveHooks>(memory: &mut [u8], theta_mptr: usize) -> Result<(), VerifyError> {
+    println!("pairing_check invoked!");
+
     // LHS
     let x =
         Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).map_err(|e| {
@@ -3149,6 +3641,8 @@ fn read_evaluations(
     mut hash_mptr: usize,
     num_evals: u64,
 ) -> Result<(usize, usize), VerifyError> {
+    println!("read_evaluations invoked!");
+
     let proof_cptr_end = proof_cptr + num_evals as usize; // num_evals
     while proof_cptr < proof_cptr_end {
         let eval: EVMWord = load_from_proof(raw_proof, proof_cptr as u32).map_err(|e| {
@@ -3163,6 +3657,9 @@ fn read_evaluations(
         }
 
         memory[hash_mptr..hash_mptr + 32].copy_from_slice(&eval); // mstore(hash_mptr, eval)
+
+        println!("Wrote: {} at 0x{:x?}", to_hex_string(&eval), hash_mptr);
+
         proof_cptr += 0x20;
         hash_mptr += 0x20;
     }
@@ -3184,6 +3681,8 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
     mut challenge_len_ptr: usize,
     mut challenge_len_data: U256,
 ) -> Result<(usize, usize, usize), VerifyError> {
+    println!("read_instances_and_witness_commitments_and_generate_challenges invoked!");
+
     for instance in pubs {
         if instance.into_u256() >= Fr::MODULUS {
             return Err(VerifyError::PublicInputError {
