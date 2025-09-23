@@ -1923,7 +1923,7 @@ fn compute_lagrange_and_instance_evaluation(
     memory[start..start + 0x20].copy_from_slice(&l_blind.into_be_bytes32());
 
     println!(
-        "Write {} at 0x{:x?}",
+        "Write l_blind == {} at 0x{:x?}",
         to_hex_string(&l_blind.into_be_bytes32()),
         start
     );
@@ -2188,7 +2188,7 @@ fn perform_lookup_computations(
     );
 
     // mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x1E0)))
-    let value = &mload(memory, 0x1e0).map_err(|e| VerifyError::KeyError {
+    let value = &mload(memory, theta_mptr as u32 + 0x1e0).map_err(|e| VerifyError::KeyError {
         message: format!("Failed to read l_blind from memory. Cause: {e}"),
     })?;
     memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(value); // l_blind
