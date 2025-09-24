@@ -453,6 +453,7 @@ fn lookup_input_accum(
     Ok((ret0, expressions_word, a))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn z_evals(
     memory: &mut [u8],
     raw_proof: &[u8],
@@ -1299,6 +1300,7 @@ fn r_evals_computation(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn single_rot_set(
     memory: &mut [u8],
     raw_proof: &[u8],
@@ -1367,6 +1369,7 @@ fn single_rot_set(
     Ok((r_eval, ptr as usize))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn multi_rot_set(
     memory: &mut [u8],
     raw_proof: &[u8],
@@ -3634,6 +3637,7 @@ fn read_evaluations(
 
 // Read instances and witness commitments and generate challenges.
 // Returns updated: (hash_mptr, proof_cptr, challenge_mptr)
+#[allow(clippy::too_many_arguments)]
 fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>(
     memory: &mut Vec<u8>,
     raw_proof: &[u8],
