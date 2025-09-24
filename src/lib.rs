@@ -76,8 +76,6 @@ pub fn verify<H: CurveHooks>(
     check_public_input_number(&memory, pubs)?;
 
     verify_proof_inner::<H>(raw_proof, pubs, &mut memory)
-
-    // TODO: Rescaling Phase (if needed)
 }
 
 /// Function performing the core verification.
@@ -282,12 +280,9 @@ fn expression_evals_packed(
     fsmp: usize,
     code_ptr: usize,
     mut expressions_word: U256,
-) -> Result<(usize, U256, ProcessOutput), ()> {
+) -> Result<(usize, U256, ProcessOutput), VerifyError> {
     // Load in the least significant byte of the `expressions_word` word to get the total number of words we will need to load in.
     let num_words_shift_up_one = (0x20 * lsb8(&expressions_word) + 0x20) as u32;
-
-    // let mut expressions_word = *expressions_word;
-
     // start of the expression encodings
     expressions_word >>= 8;
 
@@ -305,8 +300,13 @@ fn expression_evals_packed(
                     expressions_word >>= 8;
                     // Load the calldata ptr from the expression, which come from the 2nd and 3rd least significant bytes.
                     let idx = lsb16(&expressions_word);
-                    memory[mstore_ptr..mstore_ptr + 0x20]
-                        .copy_from_slice(&load_from_proof(raw_proof, idx as u32).unwrap());
+                    memory[mstore_ptr..mstore_ptr + 0x20].copy_from_slice(
+                        &load_from_proof(raw_proof, idx as u32).map_err(|e| {
+                            VerifyError::InvalidProofError {
+                                message: format!("expression_evals_packed was unable to load data from proof. Cause: {e}"),
+                            }
+                        })?,
+                    );
                     // Move to the next expression
                     expressions_word >>= 16;
                 }
@@ -316,7 +316,9 @@ fn expression_evals_packed(
                     // Load the memory ptr from the expression, which come from the 2nd and 3rd least significant bytes
                     let idx = lsb16(&expressions_word);
                     let temp = &mload(memory, idx as u32)
-                        .unwrap()
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!("expression_evals_packed was unable to load data from memory. Cause: {e}"),
+                        })?
                         .into_fr()
                         .neg_in_place()
                         .into_be_bytes32();
@@ -329,11 +331,15 @@ fn expression_evals_packed(
                     expressions_word >>= 8;
                     // Load the lhs operand memory ptr from the expression, which comes from the 2nd and 3rd least significant bytes
                     let lhs = mload(memory, lsb16(&expressions_word) as u32)
-                        .unwrap()
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!("expression_evals_packed was unable to load lhs data from memory. Cause: {e}"),
+                        })?
                         .into_fr();
                     // Load the rhs operand memory ptr from the expression, which comes from the 4th and 5th least significant bytes
                     let rhs = mload(memory, lsb16(&(expressions_word >> 16)) as u32)
-                        .unwrap()
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!("expression_evals_packed was unable to load rhs data from memory. Cause: {e}"),
+                        })?
                         .into_fr();
 
                     memory[mstore_ptr..mstore_ptr + 0x20]
@@ -346,11 +352,15 @@ fn expression_evals_packed(
                     expressions_word >>= 8;
                     // Load the lhs operand memory ptr from the expression, which comes from the 2nd and 3rd least significant bytes
                     let lhs = mload(memory, lsb16(&expressions_word) as u32)
-                        .unwrap()
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!("expression_evals_packed was unable to load lhs data from memory. Cause: {e}"),
+                        })?
                         .into_fr();
                     // Load the rhs operand memory ptr from the expression, which comes from the 4th and 5th least significant bytes
                     let rhs = mload(memory, lsb16(&(expressions_word >> 16)) as u32)
-                        .unwrap()
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!("expression_evals_packed was unable to load rhs data from memory. Cause: {e}"),
+                        })?
                         .into_fr();
 
                     memory[mstore_ptr..mstore_ptr + 0x20]
@@ -370,16 +380,26 @@ fn expression_evals_packed(
                     )?;
                     return Ok((res1, res2, ProcessOutput::Scalar(res3)));
                 }
-                _ => {
+                other => {
                     // Invalid opcode
-                    return Err(()); // TODO: define proper error
+                    return Err(VerifyError::KeyError {
+                        message: format!(
+                            "expression_evals_packed encountered an invalid opcode ({other})"
+                        ),
+                    });
                 }
             }
 
             acc += 0x20;
         }
         ret0 = code_ptr + i as usize;
-        expressions_word = mload(memory, ret0 as u32).unwrap().into_u256();
+        expressions_word = mload(memory, ret0 as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "expression_evals_packed was unable to load new expressions_word. Cause: {e}"
+                ),
+            })?
+            .into_u256();
     }
     let ret1 = expressions_word;
     let ret2 = (acc - 0x20) as usize;
@@ -393,34 +413,41 @@ fn lookup_input_accum(
     // fsmp: usize,
     i: usize,
     code_ptr: usize,
-) -> Result<(usize, U256, Fr), ()> {
+) -> Result<(usize, U256, Fr), VerifyError> {
+    let fmp = mload_u32(memory, 0x40).map_err(|e| VerifyError::KeyError {
+        message: format!(
+            "lookup_input_accum was unable to load the free-memory pointer. Cause {e}"
+        ),
+    })?;
     let mut ret0: usize = 0;
     let mut expressions_word = *expressions_word;
     expressions_word >>= 8;
     // Number of words the mptr vars for the accumulator evaluations shifted up by one
     let num_words_vars = 0x20 * lsb8(&expressions_word);
     expressions_word >>= 8;
-    // initialize the accumulator with the first value in the vars
+    // Initialize the accumulator with the first value in the vars
     let mut a = mload(memory, lsb16(&expressions_word) as u32)
-        .unwrap()
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("lookup_input_accum was unable to load initial accumulator value from memory. Cause: {e}"),
+        })?
         .into_fr();
     expressions_word >>= 16;
-    let theta = mload(
-        memory,
-        u32_from_be_tail(&mload(memory, 0x40).unwrap()) + 0x60,
-    )
-    .unwrap()
-    .into_fr();
+    let theta = mload(memory, fmp + 0x60)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("lookup_input_accum was unable to load theta from memory. Cause: {e}"),
+        })?
+        .into_fr();
+
     for j in (0..num_words_vars).step_by(0x20) {
         while !expressions_word.is_zero() {
             a = a * theta
                 + mload(memory, lsb16(&expressions_word) as u32)
-                    .unwrap()
+                    .map_err(|e| VerifyError::KeyError { message: format!("lookup_input_accum was unable to update the accumulator value with data from memory. Cause: {e}") })?
                     .into_fr();
             expressions_word >>= 16;
         }
         ret0 = code_ptr + i + j;
-        expressions_word = mload(memory, ret0 as u32).unwrap().into_u256();
+        expressions_word = mload(memory, ret0 as u32).map_err(|e| VerifyError::KeyError { message: format!("lookup_input_accum was unable to load a new expressions_word from memory. Cause: {e}") })?.into_u256();
     }
 
     Ok((ret0, expressions_word, a))
@@ -437,11 +464,13 @@ fn z_evals(
     l_0: Fr,
     y: Fr,
     mut quotient_eval_numer: Fr,
-) -> Fr {
+) -> Result<Fr, VerifyError> {
     let mut num_words = lsb16(num_words_packed);
 
     // Initialize the free static memory pointer to store the column evals.
-    let ptr = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+    let ptr = u32_from_be_tail(
+        &mload(memory, 0x40).expect("z_evals should be able to load the fmp ptr at this point."),
+    );
     let idx = ptr as usize + 0x20;
     let val = ptr + 0x40;
     memory[idx..idx + 0x20].copy_from_slice(&val.into_u256().into_be_bytes32());
@@ -449,12 +478,26 @@ fn z_evals(
     // Iterate through the tuple window length ( permutation_z_evals_len.len() - 1 ) offset by one word.
     while permutation_z_evals_ptr < perm_z_last_ptr {
         let next_z_ptr = permutation_z_evals_ptr + num_words;
-        let z_j = mload(memory, next_z_ptr as u32).unwrap().into_u256();
+        let z_j = mload(memory, next_z_ptr as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "z_evals was unable to initialize z_j using data from memory. Cause: {e}"
+                ),
+            })?
+            .into_u256();
         let lhs = load_from_proof(raw_proof, (lsb16(&z_j)) as u32)
-            .unwrap()
+            .map_err(|e| VerifyError::InvalidProofError {
+                message: format!(
+                    "z_evals was unable to initialize lhs using data from the proof. Cause: {e}"
+                ),
+            })?
             .into_fr();
         let rhs = load_from_proof(raw_proof, (lsb16(&(z >> 32))) as u32)
-            .unwrap()
+            .map_err(|e| VerifyError::InvalidProofError {
+                message: format!(
+                    "z_evals was unable to initialize rhs using data from the proof. Cause: {e}"
+                ),
+            })?
             .into_fr();
         quotient_eval_numer = quotient_eval_numer * y + l_0 * (lhs - rhs);
 
@@ -465,7 +508,7 @@ fn z_evals(
             num_words,
             permutation_z_evals_ptr,
             theta_mptr,
-        );
+        )?;
         permutation_z_evals_ptr = next_z_ptr;
         z = z_j;
     }
@@ -481,20 +524,28 @@ fn z_evals(
         num_words,
         permutation_z_evals_ptr,
         theta_mptr,
-    );
+    )?;
 
-    // iterate through col_evals to update the quotient_eval_numer accumulator
+    // Iterate through col_evals to update the quotient_eval_numer accumulator
     let fmp = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to load fmp from memory at this point."),
     ); // free memory pointer
     let temp = fmp + 0x20;
-    let end_ptr = u32_from_be_tail(&mload(memory, temp).unwrap()) as usize;
+    let end_ptr = u32_from_be_tail(&mload(memory, temp).map_err(|e| VerifyError::KeyError {
+        message: format!(
+            "z_evals was unable to initialize end_ptr using data from memory. Cause: {e}"
+        ),
+    })?) as usize;
     let start = fmp as usize + 0x40;
     for j in (start..end_ptr).step_by(0x20) {
-        quotient_eval_numer = quotient_eval_numer * y + mload(memory, j as u32).unwrap().into_fr();
+        quotient_eval_numer = quotient_eval_numer * y + mload(memory, j as u32).map_err(|e| VerifyError::KeyError {
+        message: format!(
+            "z_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}"
+        ),
+    })?.into_fr();
     }
 
-    quotient_eval_numer
+    Ok(quotient_eval_numer)
 }
 
 fn col_evals(
@@ -507,27 +558,27 @@ fn col_evals(
 ) -> Result<(), VerifyError> {
     let gamma = mload(memory, theta_mptr as u32 + 0x40)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load gamma from memory. Cause: {e}"),
+            message: format!("col_evals was unable to load gamma from memory. Cause: {e}"),
         })?
         .into_fr();
     let beta = mload(memory, theta_mptr as u32 + 0x20)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load beta from memory. Cause: {e}"),
+            message: format!("col_evalswas unable to load beta from memory. Cause: {e}"),
         })?
         .into_fr();
     let l_last = mload(memory, theta_mptr as u32 + 0x1c0)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load l_last from memory. Cause: {e}"),
+            message: format!("col_evals was unable to load l_last from memory. Cause: {e}"),
         })?
         .into_fr();
     let l_blind = mload(memory, theta_mptr as u32 + 0x1e0)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load l_blind from memory. Cause: {e}"),
+            message: format!("col_evals was unable to load l_blind from memory. Cause: {e}"),
         })?
         .into_fr();
     let i_eval = mload(memory, theta_mptr as u32 + 0x220)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load i_eval from memory. Cause: {e}"),
+            message: format!("col_evals was unable to load i_eval from memory. Cause: {e}"),
         })?
         .into_fr();
 
@@ -539,12 +590,12 @@ fn col_evals(
     // Extract the index 1 and index 0 z evaluations from the z word.
     let mut lhs = load_from_proof(raw_proof, (lsb16(&(z >> 16))) as u32)
         .map_err(|e| VerifyError::InvalidProofError {
-            message: format!("Unable to load lhs from proof. Cause: {e}"),
+            message: format!("col_evals was unable to load lhs from proof. Cause: {e}"),
         })?
         .into_fr();
     let mut rhs = load_from_proof(raw_proof, (lsb16(&z)) as u32)
         .map_err(|e| VerifyError::InvalidProofError {
-            message: format!("Unable to load rhs from proof. Cause: {e}"),
+            message: format!("col_evals was unable to load rhs from proof. Cause: {e}"),
         })?
         .into_fr();
 
@@ -557,35 +608,58 @@ fn col_evals(
             if lsb8(&z) == 0x00 {
                 eval = load_from_proof(raw_proof, (lsb16(&(z >> 8))) as u32)
                     .map_err(|e| VerifyError::InvalidProofError {
-                        message: format!("Unable to load scalar from proof, in order to initialize eval. Cause: {e}"),
+                        message: format!("col_evals was unable to load scalar from proof, in order to initialize eval. Cause: {e}"),
                     })?
                     .into_fr();
             }
 
             lhs *= eval
-                + beta
-                    * load_from_proof(raw_proof, (lsb16(&(z >> 24))) as u32)
-                        .unwrap()
-                        .into_fr()
+                + beta * load_from_proof(raw_proof, (lsb16(&(z >> 24))) as u32)
+                    .map_err(|e| VerifyError::InvalidProofError {
+                        message: format!(
+                            "col_evals was unable to update lhs using data from proof. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr()
                 + gamma;
-            rhs *= eval + mload(memory, fmp).unwrap().into_fr() + gamma;
+            rhs *= eval
+                + mload(memory, fmp)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "col_evals was unable to update rhs using data from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr()
+                + gamma;
 
             z >>= 40;
 
             // mstore(mload(0x40), mulmod(mload(mload(0x40)), DELTA, R))
             let idx = fmp as usize;
-            let val = DELTA * mload(memory, fmp).unwrap().into_fr();
+            let val = DELTA
+                * mload(memory, fmp)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "col_evals was unable to load data from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr();
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
         }
         z = mload(memory, (permutation_z_evals_ptr + j + 0x20) as u32)
             .map_err(|e| VerifyError::InvalidProofError {
-                message: format!("Unable to load z from memory. Cause: {e}"),
+                message: format!("col_evals was unable to load z from memory. Cause: {e}"),
             })?
             .into_u256();
     }
     let left_sub_right = lhs - rhs;
 
-    let fsm_ptr = u32_from_be_tail(&mload(memory, fmp + 0x20).unwrap()) as usize;
+    let fsm_ptr =
+        u32_from_be_tail(
+            &mload(memory, fmp + 0x20).map_err(|e| VerifyError::KeyError {
+                message: format!("col_evals was unable to load data from memory. Cause: {e}"),
+            })?,
+        ) as usize;
 
     let val = left_sub_right - left_sub_right * (l_last + l_blind);
     memory[fsm_ptr..fsm_ptr + 0x20].copy_from_slice(&val.into_be_bytes32());
@@ -596,7 +670,6 @@ fn col_evals(
     Ok(())
 }
 
-// TODO: Re-assess types of ret0, ret1, ret2; also for expression_evals_packed
 fn lookup_expr_evals_packed(
     memory: &mut [u8],
     raw_proof: &[u8],
@@ -604,7 +677,7 @@ fn lookup_expr_evals_packed(
     code_ptr: u32,
     expressions_word: U256,
     mv: bool,
-) -> Result<(usize, U256, Fr), ()> {
+) -> Result<(usize, U256, Fr), VerifyError> {
     // expression evaluation.
     let (ret0, ret1, ret2) = expression_evals_packed(
         memory,
@@ -618,14 +691,22 @@ fn lookup_expr_evals_packed(
         ProcessOutput::Scalar(s) => {
             let mut ret2: Fr = s;
             if mv {
-                let fmp = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+                let fmp = u32_from_be_tail(&mload(memory, 0x40).map_err(|e| VerifyError::KeyError { message: format!("lookup_expr_evals_packed was unable to load the free-memory pointer. Cause: {e}") })?);
                 // add the beta accum addmod if mv lookup
-                ret2 += mload(memory, fmp + 0x80).unwrap().into_fr();
+                ret2 += mload(memory, fmp + 0x80)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "lookup_expr_evals_packed was unable to load from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr();
             }
 
             Ok((ret0, ret1, ret2))
         }
-        _ => Err(()), // TODO: PROPER ERROR HANDLING...
+        _ => Err(VerifyError::OtherError {
+            message: "expression_evals_packed should have returned a Scalar variant.".to_string(),
+        }),
     }
 }
 
@@ -636,37 +717,66 @@ fn mv_lookup_evals(
     mut evals_ptr: usize,
     mut quotient_eval_numer: Fr,
     y: Fr,
-) -> Result<(usize, Fr, Fr), ()> {
+) -> Result<(usize, Fr, Fr), VerifyError> {
     // load the free memory pointer
-    let fmp =
-        u32_from_be_tail(&mload(memory, 0x40).expect("Should be able to load fmp at this point."));
+    let fmp = u32_from_be_tail(
+        &mload(memory, 0x40).expect("mv_lookup_evals should be able to load fmp at this point."),
+    );
     // iterate through the input_tables_len
-    let mut evals = mload(memory, evals_ptr as u32).unwrap().into_u256();
+    let mut evals = mload(memory, evals_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "mv_lookup_evals was unable to load initial evals value from memory. Cause: {e}"
+            ),
+        })?
+        .into_u256();
     // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
     let new_table = lsb8(&evals);
     evals >>= 8;
     let phi = lsb16(&evals);
 
-    let tmp1 = mload(memory, 0x20 + fmp).unwrap().into_fr();
-    let tmp2 = load_from_proof(raw_proof, phi as u32).unwrap().into_fr();
+    let tmp1 = mload(memory, 0x20 + fmp)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("mv_lookup_evals was unable to load data from memory. Cause: {e}"),
+        })?
+        .into_fr();
+    let tmp2 = load_from_proof(raw_proof, phi as u32)
+        .map_err(|e| VerifyError::InvalidProofError {
+            message: format!("mv_lookup_evals was unable to load data from the proof. Cause: {e}"),
+        })?
+        .into_fr();
     quotient_eval_numer = quotient_eval_numer * y + tmp1 * tmp2;
 
-    let tmp1 = mload(memory, fmp).unwrap().into_fr();
+    let tmp1 = mload(memory, fmp)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("mv_lookup_evals was unable to load data from memory. Cause: {e}"),
+        })?
+        .into_fr();
     quotient_eval_numer = quotient_eval_numer * y + tmp1 * tmp2;
 
     // load in the lookup_table_lines from the evals_ptr
     evals_ptr += 0x20;
     // Due to the fact that lookups can share the previous table, we can cache it for reuse.
-    let mut input_expression = mload(memory, evals_ptr as u32).unwrap().into_u256();
+    let mut input_expression = mload(memory, evals_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "mv_lookup_evals was unable to load input_expression from memory. Cause: {e}"
+            ),
+        })?
+        .into_u256();
     if new_table != 0 {
         (evals_ptr, input_expression, table) = lookup_expr_evals_packed(
             memory,
             raw_proof,
             0xa0 + fmp,
             evals_ptr as u32,
-            mload(memory, evals_ptr as u32).unwrap().into_u256(),
+            mload(memory, evals_ptr as u32).map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "mv_lookup_evals was unable to load expressions_word from memory. Cause: {e}"
+            ),
+        })?.into_u256(),
             true,
-        )?; // TODO: Error handling...
+        )?;
     }
     // outer inputs len, stored in the first input expression word
     let outer_inputs_len = lsb16(&input_expression);
@@ -684,7 +794,7 @@ fn mv_lookup_evals(
             evals_ptr as u32,
             input_expression,
             true,
-        )?; // TODO: Error handling...
+        )?;
         // store ident in free static memory
         memory[j..j + 0x20].copy_from_slice(&ident.into_be_bytes32());
     }
@@ -697,17 +807,35 @@ fn mv_lookup_evals(
         // iterate through the outer_inputs_len
         let last_idx = outer_inputs_len - 0x20;
         for i in (0..outer_inputs_len).step_by(0x20) {
-            let mut tmp = mload(memory, 0xa0 + fmp).unwrap().into_fr();
+            let mut tmp = mload(memory, 0xa0 + fmp)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "mv_lookup_evals was unable to load data from memory. Cause: {e}"
+                    ),
+                })?
+                .into_fr();
             let mut j = 0x20;
             if i == 0 {
-                tmp = mload(memory, 0xc0 + fmp).unwrap().into_fr();
+                tmp = mload(memory, 0xc0 + fmp)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "mv_lookup_evals was unable to load data from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr();
                 j = 0x40;
             }
             while j < outer_inputs_len {
                 if i == j {
                     continue;
                 }
-                tmp *= mload(memory, j as u32 + 0xa0 + fmp).unwrap().into_fr();
+                tmp *= mload(memory, j as u32 + 0xa0 + fmp)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "mv_lookup_evals was unable to load data from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr();
                 j += 0x20;
             }
             rhs += tmp;
@@ -717,24 +845,56 @@ fn mv_lookup_evals(
         }
     }
 
-    let mut tmp = mload(memory, 0xa0 + fmp).unwrap().into_fr();
+    let mut tmp = mload(memory, 0xa0 + fmp)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("mv_lookup_evals was unable to load data from memory. Cause: {e}"),
+        })?
+        .into_fr();
     for j in (0x20..outer_inputs_len).step_by(0x20) {
-        tmp *= mload(memory, j as u32 + 0xa0 + fmp).unwrap().into_fr();
+        tmp *= mload(memory, j as u32 + 0xa0 + fmp)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("mv_lookup_evals was unable to load data from memory. Cause: {e}"),
+            })?
+            .into_fr();
     }
     rhs -= load_from_proof(raw_proof, (lsb16(&(evals >> 32))) as u32)
-        .unwrap()
+        .map_err(|e| VerifyError::InvalidProofError {
+            message: format!(
+                "mv_lookup_evals was unable to load data from the proof in order to update rhs. Cause: {e}"
+            ),
+        })?
         .into_fr()
         * tmp;
     let lhs = table
         * tmp
         * (load_from_proof(raw_proof, (lsb16(&(evals >> 16))) as u32)
-            .unwrap()
+            .map_err(|e| VerifyError::InvalidProofError {
+            message: format!(
+                "mv_lookup_evals was unable to load data from the proof in order to update lhs. Cause: {e}"
+            ),
+        })?
             .into_fr()
-            - load_from_proof(raw_proof, phi as u32).unwrap().into_fr());
+            - load_from_proof(raw_proof, phi as u32).map_err(|e| VerifyError::InvalidProofError {
+            message: format!(
+                "mv_lookup_evals was unable to load data from the proof in order to update lhs. Cause: {e}"
+            ),
+        })?.into_fr());
     quotient_eval_numer = quotient_eval_numer * y
         + (Fr::ONE
-            - (mload(memory, 0x40 + fmp).unwrap().into_fr()
-                + mload(memory, fmp).unwrap().into_fr()))
+            - (mload(memory, 0x40 + fmp)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "mv_lookup_evals was unable to load data from memory. Cause: {e}"
+                    ),
+                })?
+                .into_fr()
+                + mload(memory, fmp)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "mv_lookup_evals was unable to load data from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr()))
             * (lhs - rhs);
 
     Ok((evals_ptr, table, quotient_eval_numer))
@@ -747,46 +907,64 @@ fn lookup_evals(
     mut evals_ptr: usize,
     mut quotient_eval_numer: Fr,
     y: Fr,
-) -> Result<(usize, Fr, Fr), ()> {
+) -> Result<(usize, Fr, Fr), VerifyError> {
     // load the free memory pointer
     let fmp = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to load fmp from memory at this point."),
     );
     // iterate through the input_tables_len
-    let mut evals = mload(memory, evals_ptr as u32).unwrap().into_u256();
+    let mut evals = mload(memory, evals_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "lookup_evals was unable to initialize evals with data from memory. Cause: {e}"
+            ),
+        })?
+        .into_u256();
     // We store a boolean flag in the first LSG byte of the evals ptr to determine if we need to load in a new table or reuse the previous table.
     let new_table = lsb8(&evals);
     evals >>= 8;
     let z = lsb16(&evals) as u32;
     evals >>= 16;
     quotient_eval_numer = quotient_eval_numer * y
-        + mload(memory, 0x20 + fmp).unwrap().into_fr()
-        + mload(memory, 0x20 + fmp).unwrap().into_fr()
+        + mload(memory, 0x20 + fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr()
+        + mload(memory, 0x20 + fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr()
             * load_from_proof(raw_proof, z)
-                .unwrap()
+                .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                 .into_fr()
                 .neg_in_place();
 
     quotient_eval_numer = quotient_eval_numer * y
-        + mload(memory, fmp).unwrap().into_fr()
-            * load_from_proof(raw_proof, z).unwrap().into_fr()
-            * load_from_proof(raw_proof, z).unwrap().into_fr()
+        + mload(memory, fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr()
+            * load_from_proof(raw_proof, z).map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?.into_fr()
+            * load_from_proof(raw_proof, z).map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?.into_fr()
         + load_from_proof(raw_proof, z)
-            .unwrap()
+            .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
             .into_fr()
             .neg_in_place();
 
     // load in the lookup_table_lines from the evals_ptr
     evals_ptr += 0x20;
     // Due to the fact that lookups can share the previous table, we can cache it for reuse.
-    let mut input_expression = mload(memory, evals_ptr as u32).unwrap().into_u256();
+    let mut input_expression = mload(memory, evals_ptr as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!(
+                "lookup_evals was unable to load input_expression from memory. Cause: {e}"
+            ),
+        })?
+        .into_u256();
     if new_table != 0 {
         (evals_ptr, input_expression, table) = lookup_expr_evals_packed(
             memory,
             raw_proof,
             0xc0 + fmp,
             evals_ptr as u32,
-            mload(memory, evals_ptr as u32).unwrap().into_u256(),
+            mload(memory, evals_ptr as u32)
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "lookup_evals was unable to load expressions_word from memory. Cause: {e}"
+                    ),
+                })?
+                .into_u256(),
             false,
         )?;
     }
@@ -805,53 +983,52 @@ fn lookup_evals(
 
     quotient_eval_numer = quotient_eval_numer * y
         + (Fr::ONE
-            - (mload(memory, 0x40 + fmp).unwrap().into_fr()
-                + mload(memory, fmp).unwrap().into_fr()))
+            - (mload(memory, 0x40 + fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr()
+                + mload(memory, fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr()))
             * (load_from_proof(raw_proof, lsb16(&evals) as u32)
-                .unwrap()
+                .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                 .into_fr()
                 * (load_from_proof(raw_proof, p_input as u32)
-                    .unwrap()
+                    .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                     .into_fr()
-                    + mload(memory, 0x80 + fmp).unwrap().into_fr())
+                    + mload(memory, 0x80 + fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr())
                 * (load_from_proof(raw_proof, p_table as u32)
-                    .unwrap()
+                    .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                     .into_fr()
-                    + mload(memory, 0xa0 + fmp).unwrap().into_fr())
-                - load_from_proof(raw_proof, z).unwrap().into_fr()
-                    * (input + mload(memory, 0x80 + fmp).unwrap().into_fr())
-                    * (table + mload(memory, 0xa0 + fmp).unwrap().into_fr()));
+                    + mload(memory, 0xa0 + fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr())
+                - load_from_proof(raw_proof, z).map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?.into_fr()
+                    * (input + mload(memory, 0x80 + fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr())
+                    * (table + mload(memory, 0xa0 + fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr()));
 
     quotient_eval_numer = quotient_eval_numer * y
-        + (mload(memory, 0x20 + fmp).unwrap().into_fr()
+        + (mload(memory, 0x20 + fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr()
             * (load_from_proof(raw_proof, p_input as u32)
-                .unwrap()
+                .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                 .into_fr()
                 - load_from_proof(raw_proof, p_table as u32)
-                    .unwrap()
+                    .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                     .into_fr()));
 
     quotient_eval_numer = quotient_eval_numer * y
         + (Fr::ONE
-            - (mload(memory, 0x40 + fmp).unwrap().into_fr()
-                + mload(memory, fmp).unwrap().into_fr()))
+            - (mload(memory, 0x40 + fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr()
+                + mload(memory, fmp).map_err(|e| VerifyError::KeyError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from memory. Cause: {e}") })?.into_fr()))
             * (load_from_proof(raw_proof, p_input as u32)
-                .unwrap()
+                .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                 .into_fr()
                 - load_from_proof(raw_proof, p_table as u32)
-                    .unwrap()
+                    .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                     .into_fr())
             * (load_from_proof(raw_proof, p_input as u32)
-                .unwrap()
+                .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                 .into_fr()
                 - load_from_proof(raw_proof, lsb16(&(evals >> 32)) as u32)
-                    .unwrap()
+                    .map_err(|e| VerifyError::InvalidProofError { message: format!("lookup_evals was unable to update quotient_eval_numer using data from the proof. Cause: {e}") })?
                     .into_fr());
 
     Ok((evals_ptr, table, quotient_eval_numer))
 }
 
-// TODO: DO PROPER ERROR HANDLING...
 fn point_rots(
     memory: &mut [u8],
     mut pcs_computations: U256,
@@ -860,7 +1037,7 @@ fn point_rots(
     mut x_pow_of_omega: Fr,
     omega: Fr,
     vka_end: usize,
-) -> Result<(Fr, usize), ()> {
+) -> Result<(Fr, usize), String> {
     // Extract the 32 LSG bits (4 bytes) from the pcs_computations word to get the max rot
     let values_max_rot = lsb8(&pcs_computations);
     pcs_computations >>= 8;
@@ -880,7 +1057,7 @@ fn point_rots(
         if word_shift == 256 {
             word_shift = 0;
             pcs_ptr += 0x20;
-            pcs_computations = mload(memory, pcs_ptr as u32).unwrap().into_u256();
+            pcs_computations = mload(memory, pcs_ptr as u32).map_err(|e| format!("point_rots was unable to initialize pcs_computations using data from memory. Cause: {e}"))?.into_u256();
         }
     }
 
@@ -888,10 +1065,14 @@ fn point_rots(
 }
 
 // Scale point at (0x00, 0x20) by scalar.
-fn ec_mul_acc<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
-    let vka_end = u32_from_be_tail(&mload(memory, 0x40).unwrap());
+fn ec_mul_acc<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), String> {
+    let vka_end = u32_from_be_tail(
+        &mload(memory, 0x40).expect("ec_mul_acc should be able to read vka_end at this point."),
+    );
 
-    let point = read_g1::<H>(memory, vka_end as usize).unwrap().into_group();
+    let point = read_g1::<H>(memory, vka_end as usize)
+        .map_err(|e| format!("ec_mul_acc was unable to read G1 point from memory. Cause: {e}"))?
+        .into_group();
 
     let res = (point * scalar).into_affine();
 
@@ -906,12 +1087,14 @@ fn ec_mul_acc<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
 
 // Add (x, y) into point at (0x00, 0x20).
 // Return updated (success).
-fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()> {
+fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), String> {
     let vka_end = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to load vka_end from memory."),
     );
 
-    let point1 = read_g1::<H>(memory, vka_end as usize).unwrap().into_group();
+    let point1 = read_g1::<H>(memory, vka_end as usize)
+        .map_err(|e| format!("ec_add_acc was unable to read G1 point from memory. Cause: {e}"))?
+        .into_group();
     let point2 = if *x == Fq::ZERO && *y == Fq::ZERO {
         G1::zero()
     } else {
@@ -920,7 +1103,7 @@ fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
 
     // Validate point2
     if !point2.is_on_curve() {
-        return Err(());
+        return Err("ec_add_acc encountered a point not in G1.".to_string());
     }
 
     let res = (point1 + point2).into_affine();
@@ -936,13 +1119,13 @@ fn ec_add_acc<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
 
 // Add (x, y) into point at (0x80, 0xa0).
 // Return updated (success).
-fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()> {
+fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), String> {
     let vka_end = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to load vka_end from memory."),
     );
 
     let point1 = read_g1::<H>(memory, vka_end as usize + 0x80)
-        .unwrap()
+        .map_err(|e| format!("ec_add_tmp was unable to read G1 point from memory. Cause: {e}"))?
         .into_group();
     let point2 = if *x == Fq::ZERO && *y == Fq::ZERO {
         G1::zero()
@@ -952,7 +1135,7 @@ fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
 
     // Validate point2
     if !point2.is_on_curve() {
-        return Err(());
+        return Err("ec_add_tmp encountered a point not in G1.".to_string());
     }
 
     let res = (point1 + point2).into_affine();
@@ -968,13 +1151,13 @@ fn ec_add_tmp<H: CurveHooks>(memory: &mut [u8], x: &Fq, y: &Fq) -> Result<(), ()
 
 // Scale point at (0x80, 0xa0) by scalar.
 // Return updated (success).
-fn ec_mul_tmp<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
+fn ec_mul_tmp<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), String> {
     let vka_end = u32_from_be_tail(
-        &mload(memory, 0x40).expect("Should be able to load vka_end from memory."),
+        &mload(memory, 0x40).expect("ec_mul_tmp should be able to load vka_end from memory."),
     );
 
     let point = read_g1::<H>(memory, (vka_end + 0x80) as usize)
-        .unwrap()
+        .map_err(|e| format!("ec_mul_tmp was unable to read G1 point from memory. Cause: {e}"))?
         .into_group();
 
     let res = (point * scalar).into_affine();
@@ -987,7 +1170,11 @@ fn ec_mul_tmp<H: CurveHooks>(memory: &mut [u8], scalar: &Fr) -> Result<(), ()> {
     Ok(())
 }
 
-fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256) -> U256 {
+fn coeff_computations(
+    memory: &mut [u8],
+    coeff_len_data: U256,
+    coeff_data: U256,
+) -> Result<U256, VerifyError> {
     let coeff_len = lsb8(&coeff_len_data);
     let ret = coeff_len_data >> 8;
 
@@ -1001,7 +1188,11 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
             // mstore(add(and(shr(16, coeff_data), PTR_BITMASK), mload(0x40)), mod(mload(add(and(coeff_data, PTR_BITMASK), mload(0x40))), R))
             let idx = lsb16(&(coeff_data >> 16)) + fmp as usize;
             let val = mload(memory, lsb16(&coeff_data) as u32 + fmp)
-                .unwrap()
+                .map_err(|e| VerifyError::KeyError {
+                    message: format!(
+                        "coeff_computations was unable to initialize val using data from memory. Cause: {e}"
+                    ),
+                })?
                 .into_fr();
             memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
         }
@@ -1012,7 +1203,13 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
                 let mut first: usize = 0x01;
                 let mut offset_base = i as u32 * 16;
                 let idx = lsb16(&(coeff_data >> offset_base)) as u32 + fmp;
-                let point_i = mload(memory, idx).unwrap().into_fr();
+                let point_i = mload(memory, idx)
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "coeff_computations was unable to load point_i from memory. Cause: {e}"
+                        ),
+                    })?
+                    .into_fr();
                 for j in 0..coeff_len {
                     if j == i {
                         continue;
@@ -1020,19 +1217,31 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
                     if first != 0 {
                         coeff = point_i
                             - mload(memory, lsb16(&(coeff_data >> (16 * j as u32))) as u32 + fmp)
-                                .unwrap()
+                                .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "coeff_computations was unable to update coedd using data from memory. Cause: {e}"
+                        ),
+                    })?
                                 .into_fr();
                         first = 0;
                         continue;
                     }
                     coeff *= point_i
                         - mload(memory, lsb16(&(coeff_data >> (16 * j as u32))) as u32 + fmp)
-                            .unwrap()
+                            .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "coeff_computations was unable to update coedd using data from memory. Cause: {e}"
+                        ),
+                    })?
                             .into_fr();
                 }
                 offset_base += offset_aggr as u32;
                 coeff *= mload(memory, lsb16(&(coeff_data >> offset_base)) as u32 + fmp)
-                    .unwrap()
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!(
+                            "coeff_computations was unable to update coedd using data from memory. Cause: {e}"
+                        ),
+                    })?
                     .into_fr();
                 offset_base += offset_aggr as u32;
                 let idx = lsb16(&(coeff_data >> offset_base)) + fmp as usize;
@@ -1040,10 +1249,9 @@ fn coeff_computations(memory: &mut [u8], coeff_len_data: U256, coeff_data: U256)
             }
         }
     }
-    ret
+    Ok(ret)
 }
 
-// TODO: DO PROPER ERROR HANDLING...
 fn r_evals_computation(
     memory: &mut [u8],
     raw_proof: &[u8],
@@ -1052,9 +1260,11 @@ fn r_evals_computation(
     zeta: Fr,
     quotient_eval: Fr,
     coeff_ptr: u32,
-) -> Result<(Fr, usize), String> {
+) -> Result<(Fr, usize), VerifyError> {
     let mut r_evals_data = mload(memory, r_evals_data_ptr)
-        .map_err(|e| format!("r_evals_computation failed. Cause: {e}"))?
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("r_evals_computation failed. Cause: {e}"),
+        })?
         .into_u256();
     // number of words to encode the data needed for this set in the r_evals computation.
     let num_words = lsb8(&r_evals_data) as u32;
@@ -1070,8 +1280,7 @@ fn r_evals_computation(
                 zeta,
                 quotient_eval,
                 coeff_ptr,
-            )
-            .map_err(|e| format!("r_evals_computation failed. Cause: {e}"))?;
+            )?;
             Ok((ret0, ret1))
         }
         _ => {
@@ -1084,8 +1293,7 @@ fn r_evals_computation(
                 rot_len,
                 zeta,
                 coeff_ptr,
-            )
-            .map_err(|e| format!("r_evals_computation failed. Cause: {e}"))?;
+            )?;
             Ok((ret0, ret1))
         }
     }
@@ -1100,14 +1308,18 @@ fn single_rot_set(
     zeta: Fr,
     quotient_eval: Fr,
     coeff_ptr: u32,
-) -> Result<(Fr, usize), String> {
+) -> Result<(Fr, usize), VerifyError> {
     let coeff = mload(memory, coeff_ptr)
-        .map_err(|e| format!("single_rot_set failed. Cause: {e}"))?
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("single_rot_set failed. Cause: {e}"),
+        })?
         .into_fr();
     let mut r_eval = Fr::ZERO;
     r_eval += coeff
         * load_from_proof(raw_proof, lsb16(&r_evals_data) as u32)
-            .map_err(|e| format!("single_rot_set failed. Cause: {e}"))?
+            .map_err(|e| VerifyError::InvalidProofError {
+                message: format!("single_rot_set failed. Cause: {e}"),
+            })?
             .into_fr();
     r_evals_data >>= 16;
     r_eval *= zeta;
@@ -1121,7 +1333,9 @@ fn single_rot_set(
                     r_eval = r_eval * zeta
                         + coeff
                             * load_from_proof(raw_proof, (lsb16(&r_evals_data)) as u32)
-                                .map_err(|e| format!("single_rot_set failed. Cause: {e}"))?
+                                .map_err(|e| VerifyError::InvalidProofError {
+                                    message: format!("single_rot_set failed. Cause: {e}"),
+                                })?
                                 .into_fr();
                     r_evals_data >>= 16;
                 }
@@ -1133,7 +1347,9 @@ fn single_rot_set(
                     r_eval = r_eval * zeta
                         + coeff
                             * load_from_proof(raw_proof, mptr as u32)
-                                .map_err(|e| format!("single_rot_set failed. Cause: {e}"))?
+                                .map_err(|e| VerifyError::InvalidProofError {
+                                    message: format!("single_rot_set failed. Cause: {e}"),
+                                })?
                                 .into_fr();
                     mptr -= 0x20;
                 }
@@ -1142,7 +1358,9 @@ fn single_rot_set(
         }
         ptr += 0x20;
         r_evals_data = mload(memory, ptr)
-            .map_err(|e| format!("single_rot_set failed. Cause: {e}"))?
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("single_rot_set failed. Cause: {e}"),
+            })?
             .into_u256();
     }
 
@@ -1158,16 +1376,20 @@ fn multi_rot_set(
     rot_len: u32,
     zeta: Fr,
     coeff_ptr: u32,
-) -> Result<(Fr, usize), String> {
+) -> Result<(Fr, usize), VerifyError> {
     let mut r_eval = Fr::ZERO;
     for i in 0..num_words {
         while !r_evals_data.is_zero() {
             for j in (0..rot_len).step_by(0x20) {
                 r_eval += mload(memory, coeff_ptr + j)
-                    .map_err(|e| format!("multi_rot_set failed. Cause: {e}"))?
+                    .map_err(|e| VerifyError::KeyError {
+                        message: format!("multi_rot_set failed to load from memory. Cause: {e}"),
+                    })?
                     .into_fr()
                     * load_from_proof(raw_proof, lsb16(&r_evals_data) as u32)
-                        .map_err(|e| format!("multi_rot_set failed. Cause: {e}"))?
+                        .map_err(|e| VerifyError::InvalidProofError {
+                            message: format!("multi_rot_set failed to load from proof. Cause: {e}"),
+                        })?
                         .into_fr();
                 r_evals_data >>= 16;
             }
@@ -1178,7 +1400,11 @@ fn multi_rot_set(
         }
         ptr += 0x20;
         r_evals_data = mload(memory, ptr)
-            .map_err(|e| format!("multi_rot_set failed. Cause: {e}"))?
+            .map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "multi_rot_set failed to load r_evals_data from memory. Cause: {e}"
+                ),
+            })?
             .into_u256();
     }
 
@@ -1193,19 +1419,31 @@ fn pairing_input_computations_first<H: CurveHooks>(
     mut pcs_ptr: u32,
     mut data: U256,
     theta_mptr: u32,
-) -> Result<(), ()> {
+) -> Result<(), VerifyError> {
     let fmp = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to read fmp from memory at this point."),
     );
     // mstore(mload(0x40), calldataload(and(data, PTR_BITMASK)))
     let idx = fmp as usize;
-    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
+    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| {
+        VerifyError::InvalidProofError {
+            message: format!(
+                "pairing_input_computations_first was unable to load data from proof. Cause: {e}"
+            ),
+        }
+    })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
     // mstore(add(0x20, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
     let idx = 0x20 + fmp as usize;
-    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
+    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| {
+        VerifyError::InvalidProofError {
+            message: format!(
+                "pairing_input_computations_first was unable to load data from proof. Cause: {e}"
+            ),
+        }
+    })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
@@ -1224,15 +1462,25 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             data >>= 16;
                             let mptr_end = lsb16(&data);
                             while mptr_end < mptr {
-                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                                ec_mul_acc::<H>(memory, &s)?;
+                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
+                                ec_mul_acc::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                    message: format!(
+                                        "pairing_input_computations_first failed. Cause: {e}"
+                                    ),
+                                })?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, mptr as u32).unwrap(),
+                                    &mload(memory, mptr as u32).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate x from memory. Cause: {e}") })?,
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, mptr as u32 + 0x20).unwrap(),
+                                    &mload(memory, mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate y from memory. Cause: {e}") })?,
                                 );
-                                ec_add_acc::<H>(memory, &x, &y)?;
+                                ec_add_acc::<H>(memory, &x, &y).map_err(|e| {
+                                    VerifyError::KeyError {
+                                        message: format!(
+                                            "pairing_input_computations_first failed. Cause: {e}"
+                                        ),
+                                    }
+                                })?;
                                 mptr -= 0x40;
                             }
                         }
@@ -1241,98 +1489,165 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             data >>= 16;
                             let mptr_end = lsb16(&data);
                             while mptr_end < mptr {
-                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                                ec_mul_acc::<H>(memory, &s)?;
+                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
+                                ec_mul_acc::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                    message: format!(
+                                        "pairing_input_computations_first failed. Cause: {e}"
+                                    ),
+                                })?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, mptr as u32).unwrap(),
+                                    &load_from_proof(raw_proof, mptr as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("pairing_input_computations_first failed to load coordinate x from the proof. Cause: {e}") })?,
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, (mptr + 0x20) as u32).unwrap(),
+                                    &load_from_proof(raw_proof, (mptr + 0x20) as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("pairing_input_computations_first failed to load coordinate y from the proof. Cause: {e}") })?,
                                 );
-                                ec_add_acc::<H>(memory, &x, &y)?;
+                                ec_add_acc::<H>(memory, &x, &y).map_err(|e| {
+                                    VerifyError::KeyError {
+                                        message: format!(
+                                            "pairing_input_computations_first failed. Cause: {e}"
+                                        ),
+                                    }
+                                })?;
                                 mptr -= 0x40;
                             }
                         }
-                        _ => {
-                            return Err(());
-                        } // TODO: Proper error handling
+                        other => {
+                            return Err(VerifyError::OtherError {
+                                message: format!(
+                                    "pairing_input_computations_first encountered an invalid opcode ({other})"
+                                ),
+                            });
+                        }
                     };
                     data >>= 16;
                 }
                 _ => {
                     match ptr_loc {
                         0x00 => {
-                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                            ec_mul_acc::<H>(memory, &s)?;
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
+                            ec_mul_acc::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "pairing_input_computations_first failed. Cause: {e}"
+                                ),
+                            })?;
                             let x = Fq::from_be_bytes_mod_order(
-                                &mload(memory, lsb16(&data) as u32).unwrap(),
+                                &mload(memory, lsb16(&data) as u32).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate x from memory. Cause: {e}") })?,
                             );
                             let y = Fq::from_be_bytes_mod_order(
-                                &mload(memory, lsb16(&(data >> 16)) as u32).unwrap(),
+                                &mload(memory, lsb16(&(data >> 16)) as u32).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate y from memory. Cause: {e}") })?,
                             );
-                            ec_add_acc::<H>(memory, &x, &y)?;
+                            ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "pairing_input_computations_first failed. Cause: {e}"
+                                ),
+                            })?;
                             if comm_len == 0x02 {
                                 data >>= 32;
-                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                                ec_mul_acc::<H>(memory, &s)?;
+                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
+                                ec_mul_acc::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                    message: format!(
+                                        "pairing_input_computations_first failed. Cause: {e}"
+                                    ),
+                                })?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, lsb16(&data) as u32).unwrap(),
+                                    &mload(memory, lsb16(&data) as u32).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate x from memory. Cause: {e}") })?,
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, lsb16(&(data >> 16)) as u32).unwrap(),
+                                    &mload(memory, lsb16(&(data >> 16)) as u32).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate y from memory. Cause: {e}") })?,
                                 );
-                                ec_add_acc::<H>(memory, &x, &y)?;
+                                ec_add_acc::<H>(memory, &x, &y).map_err(|e| {
+                                    VerifyError::KeyError {
+                                        message: format!(
+                                            "pairing_input_computations_first failed. Cause: {e}"
+                                        ),
+                                    }
+                                })?;
                             }
                             data >>= 32;
                         }
                         0x01 => {
-                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                            ec_mul_acc::<H>(memory, &s)?;
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
+                            ec_mul_acc::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "pairing_input_computations_first failed. Cause: {e}"
+                                ),
+                            })?;
                             let x = Fq::from_be_bytes_mod_order(
-                                &load_from_proof(raw_proof, lsb16(&data) as u32).unwrap(),
+                                &load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("pairing_input_computations_first failed to load coordinate x from the proof. Cause: {e}") })?,
                             );
                             let y = Fq::from_be_bytes_mod_order(
-                                &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32).unwrap(),
+                                &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("pairing_input_computations_first failed to load coordinate y from the proof. Cause: {e}") })?,
                             );
-                            ec_add_acc::<H>(memory, &x, &y)?;
+                            ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "pairing_input_computations_first failed. Cause: {e}"
+                                ),
+                            })?;
                             if comm_len == 0x02 {
                                 data >>= 32;
-                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                                ec_mul_acc::<H>(memory, &s)?;
+                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
+                                ec_mul_acc::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                    message: format!(
+                                        "pairing_input_computations_first failed. Cause: {e}"
+                                    ),
+                                })?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, lsb16(&data) as u32).unwrap(),
+                                    &load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("pairing_input_computations_first failed to load coordinate x from the proof. Cause: {e}") })?,
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32)
-                                        .unwrap(),
+                                    &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("pairing_input_computations_first failed to load coordinate y from the proof. Cause: {e}") })?,
                                 );
-                                ec_add_acc::<H>(memory, &x, &y)?;
+                                ec_add_acc::<H>(memory, &x, &y).map_err(|e| {
+                                    VerifyError::KeyError {
+                                        message: format!(
+                                            "pairing_input_computations_first failed. Cause: {e}"
+                                        ),
+                                    }
+                                })?;
                             }
                             data >>= 32;
                         }
                         // Quotient eval x and y points
                         0x02 => {
-                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
 
-                            ec_mul_acc::<H>(memory, &s)?;
+                            ec_mul_acc::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "pairing_input_computations_first failed. Cause: {e}"
+                                ),
+                            })?;
 
                             let x = Fq::from_be_bytes_mod_order(
-                                &mload(memory, theta_mptr + 0x260).unwrap(),
+                                &mload(memory, theta_mptr + 0x260).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate x from memory. Cause: {e}") })?,
                             );
                             let y = Fq::from_be_bytes_mod_order(
-                                &mload(memory, theta_mptr + 0x280).unwrap(),
+                                &mload(memory, theta_mptr + 0x280).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate y from memory. Cause: {e}") })?,
                             );
-                            ec_add_acc::<H>(memory, &x, &y)?;
+                            ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+                                message: format!(
+                                    "pairing_input_computations_first failed. Cause: {e}"
+                                ),
+                            })?;
                         }
-                        _ => {
-                            return Err(());
-                        } // TODO: Proper error handling
+                        other => {
+                            return Err(VerifyError::OtherError {
+                                message: format!(
+                                    "pairing_input_computations_first encountered an invalid opcode ({other})"
+                                ),
+                            });
+                        }
                     }
                 }
             }
         }
         pcs_ptr += 0x20;
-        data = mload(memory, pcs_ptr).unwrap().into_u256();
+        data = mload(memory, pcs_ptr)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "pairing_input_computations_first failed to load data from memory. Cause: {e}"
+                ),
+            })?
+            .into_u256();
     }
     Ok(())
 }
@@ -1345,19 +1660,31 @@ fn pairing_input_computations<H: CurveHooks>(
     mut pcs_ptr: u32,
     mut data: U256,
     theta_mptr: u32,
-) -> Result<(), ()> {
+) -> Result<(), VerifyError> {
     let fmp = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to read fmp from memory at this point."),
     );
     // mstore(add(0x80, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
     let idx = 0x80 + fmp as usize;
-    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
+    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| {
+        VerifyError::InvalidProofError {
+            message: format!(
+                "pairing_input_computations failed to load data from the proof. Cause: {e}"
+            ),
+        }
+    })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
     // mstore(add(0xa0, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
     let idx = 0xa0 + fmp as usize;
-    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).unwrap();
+    let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| {
+        VerifyError::InvalidProofError {
+            message: format!(
+                "pairing_input_computations failed to load data from the proof. Cause: {e}"
+            ),
+        }
+    })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
@@ -1375,15 +1702,25 @@ fn pairing_input_computations<H: CurveHooks>(
                             data >>= 16;
                             let mptr_end = lsb16(&data);
                             while mptr_end < mptr {
-                                let s = mload(memory, theta_mptr + 0xA0).unwrap().into_fr();
-                                ec_mul_tmp::<H>(memory, &s);
+                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
+                                ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                    message: format!(
+                                        "pairing_input_computations failed. Cause: {e}"
+                                    ),
+                                })?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, mptr as u32).unwrap(),
+                                    &mload(memory, mptr as u32).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate x from memory. Cause: {e}")} })?,
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, mptr as u32 + 0x20).unwrap(),
+                                    &mload(memory, mptr as u32 + 0x20).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate y from memory. Cause: {e}")} })?,
                                 );
-                                ec_add_tmp::<H>(memory, &x, &y);
+                                ec_add_tmp::<H>(memory, &x, &y).map_err(|e| {
+                                    VerifyError::KeyError {
+                                        message: format!(
+                                            "pairing_input_computations failed. Cause: {e}"
+                                        ),
+                                    }
+                                })?;
                                 mptr -= 0x40;
                             }
                         }
@@ -1392,103 +1729,158 @@ fn pairing_input_computations<H: CurveHooks>(
                             data >>= 16;
                             let mptr_end = lsb16(&data);
                             while mptr_end < mptr {
-                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                                ec_mul_tmp::<H>(memory, &s);
+                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
+                                ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                    message: format!(
+                                        "pairing_input_computations failed. Cause: {e}"
+                                    ),
+                                })?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, mptr as u32).unwrap(),
+                                    &load_from_proof(raw_proof, mptr as u32).map_err(|e| { VerifyError::InvalidProofError { message: format!("pairing_input_computations failed to load coordinate x from the proof. Cause: {e}")} })?,
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, mptr as u32 + 0x20).unwrap(),
+                                    &load_from_proof(raw_proof, mptr as u32 + 0x20).map_err(|e| { VerifyError::InvalidProofError { message: format!("pairing_input_computations failed to load coordinate y from the proof. Cause: {e}")} })?,
                                 );
-                                ec_add_tmp::<H>(memory, &x, &y);
+                                ec_add_tmp::<H>(memory, &x, &y).map_err(|e| {
+                                    VerifyError::KeyError {
+                                        message: format!(
+                                            "pairing_input_computations failed. Cause: {e}"
+                                        ),
+                                    }
+                                })?;
                                 mptr -= 0x40;
                             }
                         }
-                        _ => {
-                            return Err(());
-                        } // TODO: Proper error handling
+                        other => {
+                            return Err(VerifyError::OtherError {
+                                message: format!(
+                                    "pairing_input_computations encountered an invalid opcode ({other})"
+                                ),
+                            });
+                        }
                     }
                     data >>= 16;
                 }
                 _ => {
                     match ptr_loc {
                         0x00 => {
-                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                            ec_mul_tmp::<H>(memory, &s);
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
+                            ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                message: format!("pairing_input_computations failed. Cause: {e}"),
+                            })?;
                             let x = Fq::from_be_bytes_mod_order(
-                                &mload(memory, lsb16(&data) as u32).unwrap(),
+                                &mload(memory, lsb16(&data) as u32).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate x from memory. Cause: {e}")} })?,
                             );
                             let y = Fq::from_be_bytes_mod_order(
-                                &mload(memory, lsb16(&(data >> 16)) as u32).unwrap(),
+                                &mload(memory, lsb16(&(data >> 16)) as u32).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate y from memory. Cause: {e}")} })?,
                             );
-                            ec_add_tmp::<H>(memory, &x, &y);
+                            ec_add_tmp::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+                                message: format!("pairing_input_computations failed. Cause: {e}"),
+                            })?;
                             if comm_len == 0x2 {
                                 data >>= 32;
-                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                                ec_mul_tmp::<H>(memory, &s);
+                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
+                                ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                    message: format!(
+                                        "pairing_input_computations failed. Cause: {e}"
+                                    ),
+                                })?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, lsb16(&data) as u32).unwrap(),
+                                    &mload(memory, lsb16(&data) as u32).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate x from memory. Cause: {e}")} })?,
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, lsb16(&(data >> 16)) as u32).unwrap(),
+                                    &mload(memory, lsb16(&(data >> 16)) as u32).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate y from memory. Cause: {e}")} })?,
                                 );
-                                ec_add_tmp::<H>(memory, &x, &y);
+                                ec_add_tmp::<H>(memory, &x, &y).map_err(|e| {
+                                    VerifyError::KeyError {
+                                        message: format!(
+                                            "pairing_input_computations failed. Cause: {e}"
+                                        ),
+                                    }
+                                })?;
                             }
                             data >>= 32;
                         }
                         0x01 => {
-                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                            ec_mul_tmp::<H>(memory, &s);
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
+                            ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                message: format!("pairing_input_computations failed. Cause: {e}"),
+                            })?;
                             let x = Fq::from_be_bytes_mod_order(
-                                &load_from_proof(raw_proof, lsb16(&data) as u32).unwrap(),
+                                &load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| { VerifyError::InvalidProofError { message: format!("pairing_input_computations failed to load coordinate x from the proof. Cause: {e}")} })?,
                             );
                             let y = Fq::from_be_bytes_mod_order(
-                                &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32).unwrap(),
+                                &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32).map_err(|e| { VerifyError::InvalidProofError { message: format!("pairing_input_computations failed to load coordinate y from the proof. Cause: {e}")} })?,
                             );
-                            ec_add_tmp::<H>(memory, &x, &y);
+                            ec_add_tmp::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+                                message: format!("pairing_input_computations failed. Cause: {e}"),
+                            })?;
                             if comm_len == 0x2 {
                                 data >>= 32;
-                                let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                                ec_mul_tmp::<H>(memory, &s);
+                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
+                                ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                    message: format!(
+                                        "pairing_input_computations failed. Cause: {e}"
+                                    ),
+                                })?;
                                 let x = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, lsb16(&data) as u32).unwrap(),
+                                    &load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| { VerifyError::InvalidProofError { message: format!("pairing_input_computations failed to load coordinate x from the proof. Cause: {e}")} })?,
                                 );
                                 let y = Fq::from_be_bytes_mod_order(
                                     &load_from_proof(raw_proof, lsb16(&(data >> 16)) as u32)
-                                        .unwrap(),
+                                        .map_err(|e| { VerifyError::InvalidProofError { message: format!("pairing_input_computations failed to load coordinate y from the proof. Cause: {e}")} })?,
                                 );
-                                ec_add_tmp::<H>(memory, &x, &y);
+                                ec_add_tmp::<H>(memory, &x, &y).map_err(|e| {
+                                    VerifyError::KeyError {
+                                        message: format!(
+                                            "pairing_input_computations failed. Cause: {e}"
+                                        ),
+                                    }
+                                })?;
                             }
                             data >>= 32;
                         }
                         // Quotient eval x and y points
                         0x02 => {
-                            let s = mload(memory, theta_mptr + 0xa0).unwrap().into_fr();
-                            ec_mul_tmp::<H>(memory, &s);
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
+                            ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+                                message: format!("pairing_input_computations failed. Cause: {e}"),
+                            })?;
                             let x = Fq::from_be_bytes_mod_order(
-                                &mload(memory, theta_mptr + 0x260).unwrap(),
+                                &mload(memory, theta_mptr + 0x260).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate x from memory. Cause: {e}")} })?,
                             );
                             let y = Fq::from_be_bytes_mod_order(
-                                &mload(memory, theta_mptr + 0x280).unwrap(),
+                                &mload(memory, theta_mptr + 0x280).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate y from memory. Cause: {e}")} })?,
                             );
-                            ec_add_tmp::<H>(memory, &x, &y);
+                            ec_add_tmp::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+                                message: format!("pairing_input_computations failed. Cause: {e}"),
+                            })?;
                         }
-                        _ => {
-                            return Err(());
-                        } // TODO: Proper error handling
+                        other => {
+                            return Err(VerifyError::OtherError {
+                                message: format!(
+                                    "pairing_input_computations encountered an invalid opcode ({other})"
+                                ),
+                            });
+                        }
                     }
                 }
             }
         }
         pcs_ptr += 0x20;
-        data = mload(memory, pcs_ptr).unwrap().into_u256();
+        data = mload(memory, pcs_ptr)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!(
+                    "pairing_input_computations was unable to load data from memory. Cause: {e}"
+                ),
+            })?
+            .into_u256();
     }
     Ok(())
 }
 
 // Utility function for batch-inverting a chunk of `Fr` elements in memory.
-fn batch_invert_in_memory(memory: &mut [u8], start: u32, end: u32) -> Result<(), String> {
-    // TODO: Error handling...
+fn batch_invert_in_memory(memory: &mut Vec<u8>, start: u32, end: u32) -> Result<(), String> {
     if end <= start {
         return Err(format!(
             "Unable to batch-invert in-memory. start index (0x{:x?}) >= end index (0x{:x?})",
@@ -1502,23 +1894,28 @@ fn batch_invert_in_memory(memory: &mut [u8], start: u32, end: u32) -> Result<(),
         );
     }
 
-    let mut inverses = (start..end)
-        .step_by(0x20)
-        .map(|p| {
+    let mut inverses = Vec::new();
+    for p in (start..end).step_by(0x20) {
+        inverses.push(
             mload(memory, p)
-                .unwrap()
-                // .map_err(|e| {
-                //     format!("batch_invert_in_memory could not parse scalar from memory. Cause: {e}")
-                // })?
-                .into_fr()
-        })
-        .collect::<Vec<_>>();
+                .map_err(|e| {
+                    format!("batch_invert_in_memory could not parse scalar from memory. Cause: {e}")
+                })?
+                .into_fr(),
+        );
+    }
+
     batch_inversion(&mut inverses);
 
     let start = start as usize;
+
+    while start + inverses.len() * 0x20 >= memory.len() {
+        memory.extend_from_slice(&[0u8; 32]);
+    }
+
     for i in 0..inverses.len() {
         memory[(start + i * 0x20)..start + (i + 1) * 0x20]
-            .copy_from_slice(&inverses[i].into_be_bytes32()); // TODO: THIS CAN FAIL... (IndexOutOfBounds)
+            .copy_from_slice(&inverses[i].into_be_bytes32());
     }
 
     Ok(())
@@ -1596,7 +1993,11 @@ fn compute_lagrange_and_instance_evaluation(
     let x_n_minus_1 = x_n - Fr::ONE;
     memory[mptr_end..mptr_end + 32].copy_from_slice(&x_n_minus_1.into_be_bytes32()); // mstore(mptr_end, x_n_minus_1)
 
-    batch_invert_in_memory(memory, x_n_mptr as u32, mptr_end as u32 + 0x20);
+    batch_invert_in_memory(memory, x_n_mptr as u32, mptr_end as u32 + 0x20).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!("Batch inversion failed. Cause: {e}"),
+        }
+    })?;
 
     let l_i_common = x_n_minus_1
         * mload(memory, 0x0160)
@@ -1880,7 +2281,7 @@ fn perform_permutation_computations(
             l_0,
             y,
             quotient_eval_numer,
-        );
+        )?;
     }
 
     Ok(quotient_eval_numer)
@@ -1897,38 +2298,44 @@ fn perform_lookup_computations(
 ) -> Result<Fr, VerifyError> {
     // mstore(vka_end, mload(add(theta_mptr, 0x1C0)))
     let value = &mload(memory, theta_mptr as u32 + 0x1c0).map_err(|e| VerifyError::KeyError {
-        message: format!("Failed to read l_last from memory. Cause: {e}"),
+        message: format!(
+            "perform_lookup_computations failed to read l_last from memory. Cause: {e}"
+        ),
     })?;
     memory[vka_end..vka_end + 0x20].copy_from_slice(value); // l_last
 
     // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x200)))
     let value = &mload(memory, theta_mptr as u32 + 0x200).map_err(|e| VerifyError::KeyError {
-        message: format!("Failed to read l_0 from memory. Cause: {e}"),
+        message: format!("perform_lookup_computations failed to read l_0 from memory. Cause: {e}"),
     })?;
     memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(value); // l_0
 
     // mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x1E0)))
     let value = &mload(memory, theta_mptr as u32 + 0x1e0).map_err(|e| VerifyError::KeyError {
-        message: format!("Failed to read l_blind from memory. Cause: {e}"),
+        message: format!(
+            "perform_lookup_computations failed to read l_blind from memory. Cause: {e}"
+        ),
     })?;
     memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(value); // l_blind
 
     // mstore(add(0x60, vka_end), mload(theta_mptr))
     let value = &mload(memory, theta_mptr as u32).map_err(|e| VerifyError::KeyError {
-        message: format!("Failed to read theta from memory. Cause: {e}"),
+        message: format!(
+            "perform_lookup_computations failed to read theta from memory. Cause: {e}"
+        ),
     })?;
     memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(value); // theta
 
     // mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x20)))
     let value = &mload(memory, theta_mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError {
-        message: format!("Failed to read beta from memory. Cause: {e}"),
+        message: format!("perform_lookup_computations failed to read beta from memory. Cause: {e}"),
     })?;
     memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(value); // beta
 
     let (mut evals_ptr, meta_data) =
         soa_layout_metadata(memory, 0x380 + VKA_OFFSET + MEMORY_OFFSET).map_err(|e| {
             VerifyError::KeyError {
-                message: format!("{e}"),
+                message: e.to_string(),
             }
         })?;
 
@@ -1949,19 +2356,17 @@ fn perform_lookup_computations(
                         evals_ptr,
                         quotient_eval_numer,
                         y,
-                    )
-                    .unwrap();
+                    )?;
                 }
             }
             0x1 => {
                 // mstore(add(0xA0, vka_end), mload(add(theta_mptr, 0x40)))
-                let bytes = mload(memory, theta_mptr as u32 + 0x40).unwrap();
+                let bytes = mload(memory, theta_mptr as u32 + 0x40).map_err(|e| VerifyError::KeyError { message: format!("perform_lookup_computations was unable to read data from memory. Cause: {e}") })?;
                 memory[vka_end..vka_end + 0xa0].copy_from_slice(&bytes); // gamma
 
                 while evals_ptr < end_ptr as usize {
                     (evals_ptr, table, quotient_eval_numer) =
-                        lookup_evals(memory, raw_proof, table, evals_ptr, quotient_eval_numer, y)
-                            .unwrap();
+                        lookup_evals(memory, raw_proof, table, evals_ptr, quotient_eval_numer, y)?;
                 }
             }
             _ => {
@@ -2072,19 +2477,18 @@ fn compute_quotient_commitment<H: CurveHooks>(
             })? - 0x40;
 
     while cptr_end < cptr {
-        ec_mul_acc::<H>(memory, &x_n).map_err(|_| VerifyError::OtherError {
-            message: "".to_string(),
-        })?; // TODO: Replace with better Error variant
+        ec_mul_acc::<H>(memory, &x_n).map_err(|e| VerifyError::KeyError {
+            message: format!("compute_quotient_commitment failed. Cause: {e}"),
+        })?;
 
         let x = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read x coordinate from proof during the quotient commitment computation phase. Cause: {e}") })?);
         let y = Fq::from_be_bytes_mod_order(&load_from_proof(raw_proof, cptr + 0x20).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read y coordinate from proof during the quotient commitment computation phase. Cause: {e}") })?);
-        ec_add_acc::<H>(memory, &x, &y).map_err(|_| VerifyError::OtherError {
-            message: "".to_string(),
-        })?; // TODO: Replace with better Error variant
+        ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+            message: format!("compute_quotient_commitment failed. Cause: {e}"),
+        })?;
         cptr -= 0x40;
     }
 
-    // PATCH FIX
     while theta_mptr + 0x280 >= memory.len() {
         memory.extend_from_slice(&[0u8; 32]);
     }
@@ -2109,22 +2513,28 @@ fn perform_point_computations(
 ) -> Result<usize, VerifyError> {
     let mut point_computations = mload(memory, pcs_ptr as u32)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load point_computations from memory. Cause: {e}"),
+            message: format!("perform_point_computations was unable to load point_computations from memory. Cause: {e}"),
         })?
         .into_u256();
     let x = mload(memory, theta_mptr as u32 + 0x80)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load x from memory. Cause: {e}"),
+            message: format!(
+                "perform_point_computations was unable to load x from memory. Cause: {e}"
+            ),
         })?
         .into_fr(); // Is this a point or a scalar?
     let omega = mload(memory, 0x0180)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load omega from memory. Cause: {e}"),
+            message: format!(
+                "perform_point_computations was unable to load omega from memory. Cause: {e}"
+            ),
         })?
         .into_fr();
     let omega_inv = mload(memory, 0x01a0)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load omega_inv from memory. Cause: {e}"),
+            message: format!(
+                "perform_point_computations was unable to load omega_inv from memory. Cause: {e}"
+            ),
         })?
         .into_fr();
     let mut x_pow_of_omega = x * omega;
@@ -2137,11 +2547,13 @@ fn perform_point_computations(
         omega,
         vka_end,
     )
-    .unwrap();
+    .map_err(|e| VerifyError::KeyError {
+        message: format!("perform_point_computations failed. Cause: {e}"),
+    })?;
     pcs_ptr += 0x20;
     point_computations = mload(memory, pcs_ptr as u32)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load point_computations from memory. Cause: {e}"),
+            message: format!("perform_point_computations was unable to load point_computations from memory. Cause: {e}"),
         })?
         .into_u256();
     // Store interm point
@@ -2160,7 +2572,9 @@ fn perform_point_computations(
         omega_inv,
         vka_end,
     )
-    .unwrap();
+    .map_err(|e| VerifyError::KeyError {
+        message: format!("perform_point_computations failed. Cause: {e}"),
+    })?;
     pcs_ptr += 0x20;
 
     Ok(pcs_ptr)
@@ -2306,7 +2720,7 @@ fn perform_coeff_computations(memory: &mut [u8], mut pcs_ptr: usize) -> Result<u
                     message: format!("Unable to load coeff_data from memory. Cause: {e}"),
                 })?
                 .into_u256();
-            coeff_len_data = coeff_computations(memory, coeff_len_data, coeff_data);
+            coeff_len_data = coeff_computations(memory, coeff_len_data, coeff_data)?;
             pcs_ptr += 0x20;
         }
         coeff_len_data = mload(memory, i as u32 + 0x20)
@@ -2322,7 +2736,7 @@ fn perform_coeff_computations(memory: &mut [u8], mut pcs_ptr: usize) -> Result<u
 
 // Performs normalized coefficient computations.
 fn perform_normalized_coeff_computations(
-    memory: &mut [u8],
+    memory: &mut Vec<u8>,
     vka_end: usize,
     mut pcs_ptr: usize,
 ) -> Result<usize, VerifyError> {
@@ -2336,7 +2750,10 @@ fn perform_normalized_coeff_computations(
         memory,
         vka_end as u32,
         (vka_end + lsb16(&norm_coeff_data)) as u32,
-    );
+    )
+    .map_err(|e| VerifyError::KeyError {
+        message: format!("Batch inversion failed. Cause: {e}"),
+    })?;
 
     norm_coeff_data >>= 16;
 
@@ -2409,10 +2826,7 @@ fn perform_r_evals_computations(
                 zeta,
                 quotient_eval,
                 coeff_ptr as u32,
-            )
-            .map_err(|_| VerifyError::OtherError {
-                message: "".to_string(),
-            })?; // TODO: REVISIT WHEN DOING ERROR HANDLING...
+            )?;
             coeff_ptr += lsb8(&r_evals_meta_data);
             r_evals_meta_data >>= 8;
             if not_first {
@@ -2525,7 +2939,11 @@ fn perform_r_eval_computation(
     }
     r_eval_data >>= 16;
 
-    batch_invert_in_memory(memory, vka_end as u32, mptr_end as u32);
+    batch_invert_in_memory(memory, vka_end as u32, mptr_end as u32).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!("Batch inversion failed. Cause: {e}"),
+        }
+    })?;
 
     let r_eval_ptr = lsb16(&r_eval_data) + vka_end;
     let mut r_eval = mload(memory, mptr_end as u32 - 0x20)
@@ -2568,7 +2986,7 @@ fn perform_r_eval_computation(
     }
     // mstore(add(theta_mptr, 0x2A0), r_eval)
     let idx = theta_mptr + 0x2a0;
-    // PATCH FIX
+
     while idx >= memory.len() {
         memory.extend_from_slice(&[0u8; 32]);
     }
@@ -2588,13 +3006,15 @@ fn perform_pairing_input_computations<H: CurveHooks>(
 ) -> Result<(), VerifyError> {
     let mut nu = mload(memory, theta_mptr as u32 + 0xC0)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load nu from memory. Cause: {e}"),
+            message: format!(
+                "perform_pairing_input_computations was unable to load nu from memory. Cause: {e}"
+            ),
         })?
         .into_fr();
 
     let mut pairing_input_meta_data = mload(memory, pcs_ptr as u32)
         .map_err(|e| VerifyError::KeyError {
-            message: format!("Unable to load pairing_input_meta_data from memory. Cause: {e}"),
+            message: format!("perform_pairing_input_computations was unable to load pairing_input_meta_data from memory. Cause: {e}"),
         })?
         .into_u256();
 
@@ -2618,7 +3038,7 @@ fn perform_pairing_input_computations<H: CurveHooks>(
             if first {
                 first = false;
                 let data = mload(memory, pcs_ptr as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load data from memory during pairing_input_computations. Cause: {e}"),
+                message: format!("perform_pairing_input_computations was unable to load data from memory during perform_pairing_input_computations. Cause: {e}"),
             })?.into_u256();
                 pairing_input_computations_first::<H>(
                     memory,
@@ -2627,12 +3047,12 @@ fn perform_pairing_input_computations<H: CurveHooks>(
                     pcs_ptr as u32,
                     data,
                     theta_mptr as u32,
-                );
+                )?;
                 pcs_ptr += len;
                 continue;
             }
             let data = mload(memory, pcs_ptr as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load data from memory during pairing_input_computations. Cause: {e}"),
+                message: format!("perform_pairing_input_computations was unable to load data from memory during perform_pairing_input_computations. Cause: {e}"),
             })?.into_u256();
             pairing_input_computations::<H>(
                 memory,
@@ -2641,40 +3061,44 @@ fn perform_pairing_input_computations<H: CurveHooks>(
                 pcs_ptr as u32,
                 data,
                 theta_mptr as u32,
-            );
+            )?;
             pcs_ptr += len;
             let s = mload(memory, set_coeff as u32).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to initilize s with scalar from memory during pairing_input_computations. Cause: {e}"),
+                message: format!("perform_pairing_input_computations as unable to initilize s with scalar from memory during perform_pairing_input_computations. Cause: {e}"),
             })?.into_fr();
-            ec_mul_tmp::<H>(memory, &(nu * s));
+            ec_mul_tmp::<H>(memory, &(nu * s)).map_err(|e| VerifyError::KeyError {
+                message: format!("perform_pairing_input_computations failed. Cause: {e}"),
+            })?;
             set_coeff += 0x20;
             let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(
                 |e| VerifyError::KeyError {
                     message: format!(
-                        "Unable to load x from memory during pairing_input_computations. Cause: {e}"
+                        "perform_pairing_input_computations was unable to load x from memory during perform_pairing_input_computations. Cause: {e}"
                     ),
                 },
             )?);
             let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(
                 |e| VerifyError::KeyError {
                     message: format!(
-                        "Unable to load y from memory during pairing_input_computations. Cause: {e}"
+                        "perform_pairing_input_computationswas unable to load y from memory during perform_pairing_input_computations. Cause: {e}"
                     ),
                 },
             )?);
-            ec_add_acc::<H>(memory, &x, &y);
+            ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+                message: format!("perform_pairing_input_computations failed. Cause: {e}"),
+            })?;
             // execute this if statement if not the last set
             // if true || i < end_ptr_packed_lens - 0x20
             if true {
                 // if or(0x1, lt(i, sub(end_ptr_packed_lens, 0x20))) {
                 nu *= mload(memory, theta_mptr as u32 + 0xc0).map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to update nu using scalar from memory during pairing_input_computations. Cause: {e}"),
+                message: format!("perform_pairing_input_computations was unable to update nu using scalar from memory during pairing_input_computations. Cause: {e}"),
             })?.into_fr();
             }
         }
         pairing_input_meta_data = mload(memory, i as u32 + 0x20)
             .map_err(|e| VerifyError::KeyError {
-                message: format!("Unable to load pairing_input_meta_data from memory. Cause: {e}"),
+                message: format!("perform_pairing_input_computations was unable to load pairing_input_meta_data from memory. Cause: {e}"),
             })?
             .into_u256();
         i += 0x20;
@@ -2685,7 +3109,7 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     let idx1 = 0x01c0 + VKA_OFFSET + MEMORY_OFFSET; // g1_x index
     let idx2 = vka_end + 0x80;
     let g1_x_bytes = mload(memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
-        message: format!("Unable to load g1_x_bytes from memory. Cause: {e}"),
+        message: format!("perform_pairing_input_computations was unable to load g1_x_bytes from memory. Cause: {e}"),
     })?;
     memory[idx2..idx2 + 0x20].copy_from_slice(&g1_x_bytes);
 
@@ -2693,33 +3117,37 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     let idx1 = 0x01e0 + VKA_OFFSET + MEMORY_OFFSET; // g1_y index
     let idx2 = vka_end + 0xa0;
     let g1_y_bytes = mload(memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
-        message: format!("Unable to load g1_y_bytes from memory. Cause: {e}"),
+        message: format!("perform_pairing_input_computations was unable to load g1_y_bytes from memory. Cause: {e}"),
     })?;
     memory[idx2..idx2 + 0x20].copy_from_slice(&g1_y_bytes);
 
     let s = -mload(memory, theta_mptr as u32 + 0x2a0)
         .map_err(|e| VerifyError::KeyError {
             message: format!(
-                "Unable to load scalar from memory during pairing_input_computations. Cause: {e}"
+                "perform_pairing_input_computations was unable to load scalar from memory during pairing_input_computations. Cause: {e}"
             ),
         })?
         .into_fr();
-    ec_mul_tmp::<H>(memory, &s);
+    ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+        message: format!("perform_pairing_input_computations failed. Cause: {e}"),
+    })?;
     let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(|e| {
         VerifyError::KeyError {
             message: format!(
-                "Unable to load x from memory during pairing_input_computations. Cause: {e}"
+                "Unable to load x from memory during perform_pairing_input_computations. Cause: {e}"
             ),
         }
     })?);
     let y = Fq::from_be_bytes_mod_order(&mload(memory, 0xa0 + vka_end as u32).map_err(|e| {
         VerifyError::KeyError {
             message: format!(
-                "Unable to load y from memory during pairing_input_computations. Cause: {e}"
+                "Unable to load y from memory during perform_pairing_input_computations. Cause: {e}"
             ),
         }
     })?);
-    ec_add_acc::<H>(memory, &x, &y);
+    ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+        message: format!("perform_pairing_input_computations failed. Cause: {e}"),
+    })?;
 
     // mstore(add(0x80, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
     let idx = 0x80 + vka_end;
@@ -2757,7 +3185,9 @@ fn perform_pairing_input_computations<H: CurveHooks>(
         ),
     })?
     .into_fr();
-    ec_mul_tmp::<H>(memory, &s);
+    ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+        message: format!("perform_pairing_input_computations failed. Cause: {e}"),
+    })?;
     ec_points_cptr_packed >>= 16;
 
     let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(|e| {
@@ -2774,7 +3204,9 @@ fn perform_pairing_input_computations<H: CurveHooks>(
             ),
         }
     })?);
-    ec_add_acc::<H>(memory, &x, &y);
+    ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+        message: format!("perform_pairing_input_computations failed. Cause: {e}"),
+    })?;
 
     let w_prime_x =
         load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(|e| {
@@ -2804,7 +3236,9 @@ fn perform_pairing_input_computations<H: CurveHooks>(
             ),
         })?
         .into_fr();
-    ec_mul_tmp::<H>(memory, &s);
+    ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
+        message: format!("perform_pairing_input_computations failed. Cause: {e}"),
+    })?;
     let x = Fq::from_be_bytes_mod_order(&mload(memory, 0x80 + vka_end as u32).map_err(|e| {
         VerifyError::KeyError {
             message: format!(
@@ -2819,9 +3253,10 @@ fn perform_pairing_input_computations<H: CurveHooks>(
             ),
         }
     })?);
-    ec_add_acc::<H>(memory, &x, &y);
+    ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+        message: format!("perform_pairing_input_computations failed. Cause: {e}"),
+    })?;
 
-    // PATCH FIX
     while theta_mptr + 0x320 >= memory.len() {
         memory.extend_from_slice(&[0u8; 32]);
     }
@@ -2954,7 +3389,9 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
         };
 
         // [pairing_lhs] += challenge * [acc_lhs]
-        ec_mul_acc::<H>(memory, &challenge);
+        ec_mul_acc::<H>(memory, &challenge).map_err(|e| VerifyError::KeyError {
+            message: format!("random_linear_combine_with_accumulator failed. Cause: {e}"),
+        })?;
         let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x2c0).map_err(
             |e| VerifyError::KeyError {
                 message: format!(
@@ -2969,7 +3406,9 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
                 ),
             },
         )?);
-        ec_add_acc::<H>(memory, &x, &y);
+        ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+            message: format!("random_linear_combine_with_accumulator failed. Cause: {e}"),
+        })?;
         // mstore(add(theta_mptr, 0x2c0), mload(vka_end))
         let idx = theta_mptr + 0x2c0;
         let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
@@ -3005,7 +3444,9 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
             })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
-        ec_mul_acc::<H>(memory, &challenge);
+        ec_mul_acc::<H>(memory, &challenge).map_err(|e| VerifyError::KeyError {
+            message: format!("random_linear_combine_with_accumulator failed. Cause: {e}"),
+        })?;
         let x = Fq::from_be_bytes_mod_order(&mload(memory, theta_mptr as u32 + 0x300).map_err(
             |e| VerifyError::KeyError {
                 message: format!(
@@ -3020,7 +3461,9 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
                 ),
             },
         )?);
-        ec_add_acc::<H>(memory, &x, &y);
+        ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
+            message: format!("random_linear_combine_with_accumulator failed. Cause: {e}"),
+        })?;
         // mstore(add(theta_mptr, 0x300), mload(vka_end))
         let idx = theta_mptr + 0x300;
         let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
@@ -3220,7 +3663,7 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
         challenge_len_ptr += 0x20;
         while !challenge_len_data.is_zero() {
             // add proof_cptr to num advices len
-            let proof_cptr_end = proof_cptr + lsb16(&challenge_len_data) as usize;
+            let proof_cptr_end = proof_cptr + lsb16(&challenge_len_data);
             challenge_len_data >>= 16;
             // Phase loop
             while proof_cptr < proof_cptr_end {
@@ -3244,7 +3687,7 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
                 Err(_) => {
                     return Err(VerifyError::OtherError {
                         message: "Failed to squeeze challenge.".to_string(),
-                    }); // TODO: Rework to use better error propagation
+                    });
                 }
             };
 
@@ -3259,12 +3702,12 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
                     Err(_) => {
                         return Err(VerifyError::OtherError {
                             message: "Failed to squeeze subsequent challenge.".to_string(),
-                        }); // TODO: Rework to use better error propagation
+                        });
                     }
                 };
             }
         }
-        challenge_len_data = mload(&memory, challenge_len_ptr as u32)
+        challenge_len_data = mload(memory, challenge_len_ptr as u32)
             .map_err(|e| VerifyError::KeyError {
                 message: format!("Unable to read challenge_len_data from memory. Cause: {e}"),
             })?
