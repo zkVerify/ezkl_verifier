@@ -444,7 +444,5 @@ fn verify_valid_proof_alt(
     valid_raw_proof_alt: [u8; 3072],
     valid_instances_alt: [PublicInput; 1],
 ) {
-    let res = verify::<()>(&valid_vka_alt, &valid_raw_proof_alt, &valid_instances_alt);
-    println!("{res:?}");
-    assert!(res.is_ok())
+    assert!(verify::<()>(&valid_vka_alt, &valid_raw_proof_alt, &valid_instances_alt).is_ok())
 }
