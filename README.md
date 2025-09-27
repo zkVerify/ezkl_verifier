@@ -281,5 +281,5 @@ let instances = [
     )];
 
 // Invoke the EZKL verifier.
-assert!(verify::<()>(&valid_vka_alt, &valid_raw_proof_alt, &valid_instances_alt).is_ok()); // success
+assert!(verify::<()>(&vka, &raw_proof, &instances).is_ok()); // success
 ```
