@@ -3,10 +3,8 @@
 
 mod constants;
 pub mod errors;
-// mod proof;
 mod types;
 mod utils;
-// mod vk;
 
 extern crate alloc;
 extern crate core;
@@ -51,6 +49,7 @@ enum ProcessOutput {
     Scalar(Fr),
 }
 
+/// Verifies the given `raw_proof` and public inputs `pubs` using the verification key `raw_vka`.
 pub fn verify<H: CurveHooks>(
     raw_vka: &[u8],
     raw_proof: &[u8],
