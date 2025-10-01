@@ -14,6 +14,7 @@ extern crate core;
 use alloc::{
     format,
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 use ark_bn254_ext::CurveHooks;
