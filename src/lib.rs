@@ -131,6 +131,8 @@ fn verify_proof_inner<H: CurveHooks>(
         proof_cptr,
     )?;
 
+    read_accumulator_from_instances(memory)?;
+
     compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
     perform_quotient_evaluation(memory, raw_proof, vka_end, theta_mptr)?;
     compute_quotient_commitment::<H>(memory, raw_proof, vka_end, theta_mptr)?;
@@ -3618,7 +3620,7 @@ fn read_evaluations(
             });
         }
 
-        memory[hash_mptr..hash_mptr + 32].copy_from_slice(&eval); // mstore(hash_mptr, eval)
+        memory[hash_mptr..hash_mptr + 32].copy_from_slice(&eval);
 
         proof_cptr += 0x20;
         hash_mptr += 0x20;
@@ -3783,6 +3785,25 @@ fn read_bdfg21_batch_opening_proof_and_generate_challenges<H: CurveHooks>(
     };
 
     Ok(())
+}
+
+// Read accumulator from instances
+fn read_accumulator_from_instances(memory: &mut [u8]) -> Result<(), VerifyError> {
+    let has_accumulator = !mload(memory, 0x0140 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to read has_accumulator field from VKA. Cause: {e}"),
+        })?
+        .into_u256()
+        .is_zero();
+
+    if has_accumulator {
+        // TODO: Replace with actual logic
+        Err(VerifyError::OtherError {
+            message: "Accumulators currently not supported.".to_string(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

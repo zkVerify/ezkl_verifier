@@ -67,15 +67,14 @@ contract Halo2VerifierReusable {
         }
         require(registeredVkas[vka_digest], "VKA not registered");
         success = _verifyProof(proof, instances, vka);
-
         assembly {
             // Perform the rescaling of the instances
             let rescaled_mptr := 0x40
             let instances_len := mul(instances.length, 0x20)
-            // fetch the rescaling data from the vk (last word of the vk)
+            // fetch the rescaling data from the vka
             let rescaling_data_cptr := add(
                 add(instances.offset, instances_len),
-                vka_length
+                mload(0x0460)
             )
             let rescaling_data := calldataload(rescaling_data_cptr)
             // extract num_words
@@ -84,13 +83,13 @@ contract Halo2VerifierReusable {
             // extract the decimals used for the rescaling from felt fixed points to floats
             let decimals := exp(10, and(rescaling_data, BYTE_FLAG_BITMASK))
             rescaling_data := shr(8, rescaling_data)
-            // extract the number of hashes processed by the circuit
-            let num_hashes := and(rescaling_data, BYTE_FLAG_BITMASK)
+            // extract the number of processed inputs
+            let num_processed_inputs := and(rescaling_data, BYTE_FLAG_BITMASK)
             rescaling_data := shr(8, rescaling_data)
-            // instance_cptr offset by the number of hashes (we don't want to rescale hashes)
-            let instance_cptr := add(instances.offset, num_hashes)
+            // instance_cptr offset by the number of processed inputs (we don't want to rescale processed inputs)
+            let instance_cptr := add(instances.offset, num_processed_inputs)
             // store the length of the rescaled instances
-            mstore(rescaled_mptr, sub(instances_len, num_hashes))
+            mstore(rescaled_mptr, sub(instances_len, num_processed_inputs))
             rescaled_mptr := add(rescaled_mptr, 0x20)
             for {
                 let i := 0
@@ -104,8 +103,11 @@ contract Halo2VerifierReusable {
 
                 } {
                     // extract num_instances
-                    let num_instances := and(rescaling_data, PTR_BITMASK)
-                    rescaling_data := shr(16, rescaling_data)
+                    let num_instances := and(rescaling_data, 0xFFFFFFFF)
+                    rescaling_data := shr(32, rescaling_data)
+                    // extract the scale sign (1 => +, 0 => -)
+                    let scale_sign := and(rescaling_data, BYTE_FLAG_BITMASK)
+                    rescaling_data := shr(8, rescaling_data)
                     // extract the scale value (bits preserved in the fixed point representation of the instance)
                     let scale := shl(and(rescaling_data, BYTE_FLAG_BITMASK), 1)
                     rescaling_data := shr(8, rescaling_data)
@@ -121,16 +123,26 @@ contract Halo2VerifierReusable {
                             neg := 1
                         }
                         // Perform on-chain rounding
-                        let output := add(
-                            div(mul(instance, decimals), scale),
-                            gt(
-                                add(
-                                    mul(mulmod(instance, decimals, scale), 2),
-                                    1
-                                ),
-                                scale
+                        let output := mul(mul(instance, decimals), scale)
+                        switch scale_sign
+                        case 0x1 {
+                            output := add(
+                                div(mul(instance, decimals), scale),
+                                gt(
+                                    add(
+                                        mul(
+                                            mulmod(instance, decimals, scale),
+                                            2
+                                        ),
+                                        1
+                                    ),
+                                    scale
+                                )
                             )
-                        )
+                        }
+                        case 0x0 {
+                            output := mul(mul(instance, decimals), scale)
+                        }
                         // Now if neg is true compute the two's compliment of the output.
                         if neg {
                             output := sub(0, output)
@@ -1593,7 +1605,7 @@ contract Halo2VerifierReusable {
                 // Check valid length of proof
                 success := and(
                     success,
-                    eq(sub(instance_cptr, 0xa4), proof.length) // 1248
+                    eq(sub(instance_cptr, 0xa4), proof.length)
                 )
 
                 // Check valid length of instances
@@ -1614,7 +1626,7 @@ contract Halo2VerifierReusable {
                 // Set the theta_mptr (vk_mptr + vk_len + challenges_length)
                 theta_mptr := add(challenge_mptr, mload(0x0120))
 
-                let challenge_len_ptr := 0x04a0
+                let challenge_len_ptr := 0x04c0
                 let challenge_len_data := mload(challenge_len_ptr)
                 let num_words := and(challenge_len_data, BYTE_FLAG_BITMASK)
                 challenge_len_data := shr(8, challenge_len_data)
@@ -2031,7 +2043,7 @@ contract Halo2VerifierReusable {
                     }
                 }
                 {
-                    // MV lookup computations
+                    // lookup computations
                     mstore(vka_end, mload(add(theta_mptr, 0x1C0))) // l_last
                     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x200))) // l_0
                     mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x1E0))) // l_blind
@@ -2688,6 +2700,6 @@ contract Halo2VerifierReusable {
                 revert(0x00, 0x00)
             }
             result := success
-        } // end assembly
+        }
     }
 }

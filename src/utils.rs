@@ -266,8 +266,6 @@ pub(crate) fn mload_u32(memory: &[u8], addr: u32) -> Result<u32, UtilityError> {
     Ok(u32_from_be_tail(bytes))
 }
 
-// TODO: Address edge cases.
-// TODO: Also, better name.
 pub(crate) fn load_from_proof(raw_proof: &[u8], addr: u32) -> Result<EVMWord, UtilityError> {
     let idx = addr as usize - PROOF_OFFSET;
     let slice = raw_proof
