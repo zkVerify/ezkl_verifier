@@ -55,7 +55,7 @@ pub fn verify<H: CurveHooks>(
     raw_proof: &[u8],
     pubs: &Public,
 ) -> Result<(), VerifyError> {
-    let mut memory = Vec::<u8>::from(&mut [0u8; 64]);
+    let mut memory = vec![0u8; 64];
 
     if raw_vka.is_empty() || raw_vka.len() & 0x1f != 0 {
         return Err(VerifyError::KeyError {
