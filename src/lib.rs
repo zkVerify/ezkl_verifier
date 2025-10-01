@@ -129,9 +129,6 @@ fn verify_proof_inner<H: CurveHooks>(
         proof_cptr,
     )?;
 
-    // TODO: Restore when implemented.
-    // read_accumulator_from_instances();
-
     compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
     perform_quotient_evaluation(memory, raw_proof, vka_end, theta_mptr)?;
     compute_quotient_commitment::<H>(memory, raw_proof, vka_end, theta_mptr)?;
@@ -3792,47 +3789,6 @@ fn read_bdfg21_batch_opening_proof_and_generate_challenges<H: CurveHooks>(
 
     Ok(())
 }
-
-// TODO:
-// Read accumulator from instances
-// fn read_accumulator_from_instances() {
-// if !mload(memory, 0x0140 + VKA_OFFSET as u32 + 5*0x20).unwrap().into_u256().is_zero() { // Validation needed
-//     let num_limbs = mload_u32(memory, 0x0180 + VKA_OFFSET as u32 + 5 * 0x20).unwrap();
-//     let num_limb_bits = mload_u32(memory, 0x01a0 + VKA_OFFSET as u32 + 5 * 0x20).unwrap();
-
-//     let cptr = add(instances.offset, mul(mload(0x0200), 0x20));
-//     let lhs_y_off = num_limbs * 0x20;
-//     let rhs_x_off = lhs_y_off * 2;
-//     let rhs_y_off = lhs_y_off * 3;
-//     let lhs_x = load_from_proof(raw_proof, cptr).unwrap();
-//     let lhs_y = load_from_proof(raw_proof, cptr + lhs_y_off).unwrap();
-//     let rhs_x = load_from_proof(raw_proof, cptr + rhs_x_off).unwrap();
-//     let rhs_y = load_from_proof(raw_proof, cptr + rhs_y_off).unwrap();
-//     for
-//         {
-//             let cptr_end := add(cptr, mul(0x20, num_limbs))
-//             let shift := num_limb_bits
-//         }
-//         lt(cptr, cptr_end)
-//         {}
-//     {
-//         cptr := add(cptr, 0x20)
-//         lhs_x := add(lhs_x, shl(shift, calldataload(cptr)))
-//         lhs_y := add(lhs_y, shl(shift, calldataload(add(cptr, lhs_y_off))))
-//         rhs_x := add(rhs_x, shl(shift, calldataload(add(cptr, rhs_x_off))))
-//         rhs_y := add(rhs_y, shl(shift, calldataload(add(cptr, rhs_y_off))))
-//         shift := add(shift, num_limb_bits)
-//     }
-
-//     success := and(success, eq(mulmod(lhs_y, lhs_y, Q), addmod(mulmod(lhs_x, mulmod(lhs_x, lhs_x, Q), Q), 3, Q)))
-//     success := and(success, eq(mulmod(rhs_y, rhs_y, Q), addmod(mulmod(rhs_x, mulmod(rhs_x, rhs_x, Q), Q), 3, Q)))
-
-//     mstore(add(theta_mptr, 0x100), lhs_x)
-//     mstore(add(theta_mptr, 0x120), lhs_y)
-//     mstore(add(theta_mptr, 0x140), rhs_x)
-//     mstore(add(theta_mptr, 0x160), rhs_y)
-// }
-// }
 
 #[cfg(test)]
 mod should;
