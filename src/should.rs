@@ -446,3 +446,55 @@ fn verify_valid_proof_alt(
 ) {
     assert!(verify::<()>(&valid_vka_alt, &valid_raw_proof_alt, &valid_instances_alt).is_ok())
 }
+
+mod reject {
+    use super::*;
+
+    #[rstest]
+    fn a_proof_with_non_matching_number_of_instances(
+        valid_vka_alt: [u8; 5024],
+        valid_raw_proof_alt: [u8; 3072],
+        _valid_instances_alt: [PublicInput; 1],
+    ) {
+        let invalid_instances: [PublicInput; 0] = [];
+
+        assert_eq!(
+            verify::<()>(&valid_vka_alt, &valid_raw_proof_alt, &invalid_instances).unwrap_err(),
+            VerifyError::PublicInputError {
+                message: "Number of instances provided does not match those in the vka. Given: 0; Expected: 1".to_string()
+            }
+        );
+    }
+
+    #[rstest]
+    fn a_proof_with_empty_vka(
+        _valid_vka_alt: [u8; 5024],
+        valid_raw_proof_alt: [u8; 3072],
+        valid_instances_alt: [PublicInput; 1],
+    ) {
+        let invalid_vka: [u8; 0] = [];
+
+        assert_eq!(
+            verify::<()>(&invalid_vka, &valid_raw_proof_alt, &valid_instances_alt).unwrap_err(),
+            VerifyError::KeyError {
+                message: "vk length must be a positive multiple of 32".to_string()
+            }
+        );
+    }
+
+    #[rstest]
+    fn a_proof_with_vka_whose_length_is_not_a_multiple_of_32(
+        _valid_vka_alt: [u8; 5024],
+        valid_raw_proof_alt: [u8; 3072],
+        valid_instances_alt: [PublicInput; 1],
+    ) {
+        let invalid_vka: [u8; 31] = [0; 31];
+
+        assert_eq!(
+            verify::<()>(&invalid_vka, &valid_raw_proof_alt, &valid_instances_alt).unwrap_err(),
+            VerifyError::KeyError {
+                message: "vk length must be a positive multiple of 32".to_string()
+            }
+        );
+    }
+}

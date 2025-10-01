@@ -2522,7 +2522,7 @@ fn perform_point_computations(
                 "perform_point_computations was unable to load x from memory. Cause: {e}"
             ),
         })?
-        .into_fr(); // Is this a point or a scalar?
+        .into_fr();
     let omega = mload(memory, 0x0180)
         .map_err(|e| VerifyError::KeyError {
             message: format!(
@@ -2599,7 +2599,6 @@ fn perform_vanishing_computations(
         })?
         .into_u256();
 
-    // mstore(add(0x20, vka_end), 1)
     memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&U256::one().into_be_bytes32());
 
     let mut mptr = lsb16(&vanishing_computations);
