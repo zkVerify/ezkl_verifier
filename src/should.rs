@@ -467,6 +467,27 @@ mod reject {
     }
 
     #[rstest]
+    fn a_proof_with_no_number_of_instances_in_vka(
+        valid_vka_alt: [u8; 5024],
+        valid_raw_proof_alt: [u8; 3072],
+        valid_instances_alt: [PublicInput; 1],
+    ) {
+        let new_length = 0x20;
+        let invalid_vka: Vec<u8> = valid_vka_alt[..new_length].to_vec();
+
+        assert_eq!(
+            verify::<()>(&invalid_vka, &valid_raw_proof_alt, &valid_instances_alt).unwrap_err(),
+            VerifyError::KeyError {
+                message: format!(
+                    "Unable to retrieve number of instances from the VKA. Cause: mload failed. Attempted to access index: {}, while memory length is: {}",
+                    0x40 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32,
+                    MEMORY_OFFSET + invalid_vka.len()
+                )
+            }
+        );
+    }
+
+    #[rstest]
     fn a_proof_with_empty_vka(
         _valid_vka_alt: [u8; 5024],
         valid_raw_proof_alt: [u8; 3072],

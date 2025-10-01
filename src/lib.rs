@@ -63,11 +63,13 @@ pub fn verify<H: CurveHooks>(
         });
     }
 
+    // Compute and store the vka_end into memory
     memory.extend_from_slice(
         &(raw_vka.len() + MEMORY_OFFSET)
             .into_u256()
             .into_be_bytes32(),
     );
+
     memory.extend_from_slice(&[0u8; 32]);
     memory.extend_from_slice(&raw_vka.len().into_u256().into_be_bytes32());
     memory.extend_from_slice(raw_vka);
@@ -143,12 +145,8 @@ fn check_public_input_number(memory: &[u8], pubs: &Public) -> Result<(), VerifyE
     let num_instances = pubs.len();
     let idx = 0x40 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32;
     let num_instances_in_vka = mload(memory, idx)
-        .map_err(|_| VerifyError::KeyError {
-            message: format!(
-                "Unable to access memory at index 0x{:x?} (num_instances).",
-                idx
-            )
-            .to_string(),
+        .map_err(|e| VerifyError::KeyError {
+            message: format!("Unable to retrieve number of instances from the VKA. Cause: {e}"),
         })?
         .into_u256();
     if num_instances.into_u256() != num_instances_in_vka {
@@ -208,7 +206,6 @@ fn squeeze_challenge(
     challenge_mptr: usize,
     hash_mptr: usize,
 ) -> Result<(usize, usize), ()> {
-    // let hash := keccak256(vka_end, sub(hash_mptr, vka_end))
     let start = vka_end;
     let end = hash_mptr; // start + hash_mptr - vka_end
 
@@ -218,14 +215,14 @@ fn squeeze_challenge(
         .into();
 
     // write hash into memory for use for subsequent challenge generation(s).
-    memory[vka_end..vka_end + 0x20].copy_from_slice(&hash); // mstore(vka_end, hash)
+    memory[vka_end..vka_end + 0x20].copy_from_slice(&hash);
     while challenge_mptr >= memory.len() {
         memory.extend_from_slice(&[0u8; 32]);
     }
 
     // write hash (mod R) into memory.
     memory[challenge_mptr..challenge_mptr + 0x20]
-        .copy_from_slice(&hash.into_fr().into_be_bytes32()); // mstore(challenge_mptr, mod(hash, R))
+        .copy_from_slice(&hash.into_fr().into_be_bytes32());
 
     Ok((challenge_mptr + 0x20, vka_end + 0x20))
 }
@@ -240,19 +237,18 @@ fn squeeze_challenge_cont(
     vka_end: usize,
     challenge_mptr: usize,
 ) -> Result<usize, ()> {
-    memory[vka_end + 0x20] = 1u8; // mstore8(add(vka_end, 0x20), 0x01)
-    // let hash := keccak256(vka_end, 0x21)
+    memory[vka_end + 0x20] = 1u8;
     let hash: [u8; 32] = Keccak256::new()
         .chain_update(&memory[vka_end..vka_end + 0x21])
         .finalize()
         .into();
-    memory[vka_end..vka_end + 0x20].copy_from_slice(&hash); // mstore(vka_end, hash)
+    memory[vka_end..vka_end + 0x20].copy_from_slice(&hash);
     while challenge_mptr >= memory.len() {
         memory.extend_from_slice(&[0u8; 32]);
     }
 
     memory[challenge_mptr..challenge_mptr + 0x20]
-        .copy_from_slice(&hash.into_fr().into_be_bytes32()); // mstore(challenge_mptr, mod(hash, R))
+        .copy_from_slice(&hash.into_fr().into_be_bytes32());
 
     Ok(challenge_mptr + 0x20)
 }
