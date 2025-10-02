@@ -1774,7 +1774,7 @@ fn pairing_input_computations<H: CurveHooks>(
                                 if i == 0 {
                                     read_g1::<H>(memory, fmp as usize + 0x80).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
                                 } else {
-                                    read_g1::<H>(raw_proof, mptr - (i as usize - 1) * 0x40 - PROOF_OFFSET).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
+                                    read_g1::<H>(raw_proof, mptr - (i as usize - 1) * 0x40 - PROOF_OFFSET).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to load G1 point from proof during MSM computation. Cause: {e}") })
                                 }
                             }).collect::<Result<Vec<_>, _>>()?;
 
