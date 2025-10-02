@@ -365,12 +365,8 @@ fn expression_evals_packed(
                 // 0x04 => (For lookup expressions) Start accumulator evaluations for the lookup (table or input)
                 // Will always occur at the end of the last word of the lookup expression.
                 0x04 => {
-                    let (res1, res2, res3) = lookup_input_accum(
-                        memory,
-                        &expressions_word,
-                        i as usize,
-                        code_ptr,
-                    )?;
+                    let (res1, res2, res3) =
+                        lookup_input_accum(memory, &expressions_word, i as usize, code_ptr)?;
                     return Ok((res1, res2, ProcessOutput::Scalar(res3)));
                 }
                 other => {
@@ -1458,10 +1454,11 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
                             scalars.push(Fr::ONE);
                             for _ in 1..num_commitments {
-                                scalars.push(*scalars.last().expect("Should always be non-empty") * s);
+                                scalars
+                                    .push(*scalars.last().expect("Should always be non-empty") * s);
                             }
 
-                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
+                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().map(|i| {
                                 if i == 0 {
                                     read_g1::<H>(memory, fmp as usize).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
                                 } else {
@@ -1469,13 +1466,25 @@ fn pairing_input_computations_first<H: CurveHooks>(
                                 }
                             }).collect::<Result<Vec<_>, _>>()?;
 
-                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| VerifyError::OtherError {
-                                message: format!("MSM computation failed."),
+                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| {
+                                VerifyError::OtherError {
+                                    message: "MSM computation failed.".into(),
+                                }
                             })?;
 
                             // Write result of MSM computation into memory
-                            memory[fmp as usize..fmp as usize + 0x20].copy_from_slice(&res.into_affine().x().expect("Should succeed").into_be_bytes32());
-                            memory[fmp as usize + 0x20..fmp as usize + 0x40].copy_from_slice(&res.into_affine().y().expect("Should succeed").into_be_bytes32());
+                            memory[fmp as usize..fmp as usize + 0x20].copy_from_slice(
+                                &res.into_affine()
+                                    .x()
+                                    .expect("Should succeed")
+                                    .into_be_bytes32(),
+                            );
+                            memory[fmp as usize + 0x20..fmp as usize + 0x40].copy_from_slice(
+                                &res.into_affine()
+                                    .y()
+                                    .expect("Should succeed")
+                                    .into_be_bytes32(),
+                            );
                         }
                         0x1 => {
                             let mptr = lsb16(&data);
@@ -1487,10 +1496,11 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
                             scalars.push(Fr::ONE);
                             for _ in 1..num_commitments {
-                                scalars.push(*scalars.last().expect("Should always be non-empty") * s);
+                                scalars
+                                    .push(*scalars.last().expect("Should always be non-empty") * s);
                             }
 
-                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
+                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().map(|i| {
                                 if i == 0 {
                                     read_g1::<H>(memory, fmp as usize).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
                                 } else {
@@ -1498,13 +1508,25 @@ fn pairing_input_computations_first<H: CurveHooks>(
                                 }
                             }).collect::<Result<Vec<_>, _>>()?;
 
-                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| VerifyError::OtherError {
-                                message: format!("MSM computation failed."),
+                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| {
+                                VerifyError::OtherError {
+                                    message: "MSM computation failed.".into(),
+                                }
                             })?;
 
                             // Write result of MSM computation into memory
-                            memory[fmp as usize..fmp as usize + 0x20].copy_from_slice(&res.into_affine().x().expect("Should succeed").into_be_bytes32());
-                            memory[fmp as usize + 0x20..fmp as usize + 0x40].copy_from_slice(&res.into_affine().y().expect("Should succeed").into_be_bytes32());
+                            memory[fmp as usize..fmp as usize + 0x20].copy_from_slice(
+                                &res.into_affine()
+                                    .x()
+                                    .expect("Should succeed")
+                                    .into_be_bytes32(),
+                            );
+                            memory[fmp as usize + 0x20..fmp as usize + 0x40].copy_from_slice(
+                                &res.into_affine()
+                                    .y()
+                                    .expect("Should succeed")
+                                    .into_be_bytes32(),
+                            );
                         }
                         other => {
                             return Err(VerifyError::OtherError {
@@ -1702,10 +1724,11 @@ fn pairing_input_computations<H: CurveHooks>(
                             let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
                             scalars.push(Fr::ONE);
                             for _ in 1..num_commitments {
-                                scalars.push(*scalars.last().expect("Should always be non-empty") * s);
+                                scalars
+                                    .push(*scalars.last().expect("Should always be non-empty") * s);
                             }
 
-                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
+                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().map(|i| {
                                 if i == 0 {
                                     read_g1::<H>(memory, fmp as usize + 0x80).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
                                 } else {
@@ -1713,13 +1736,25 @@ fn pairing_input_computations<H: CurveHooks>(
                                 }
                             }).collect::<Result<Vec<_>, _>>()?;
 
-                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| VerifyError::OtherError {
-                                message: format!("MSM computation failed."),
+                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| {
+                                VerifyError::OtherError {
+                                    message: "MSM computation failed.".into(),
+                                }
                             })?;
 
                             // Write result of MSM computation into memory
-                            memory[fmp as usize + 0x80..fmp as usize + 0xa0].copy_from_slice(&res.into_affine().x().expect("Should succeed").into_be_bytes32());
-                            memory[fmp as usize + 0xa0..fmp as usize + 0xc0].copy_from_slice(&res.into_affine().y().expect("Should succeed").into_be_bytes32());
+                            memory[fmp as usize + 0x80..fmp as usize + 0xa0].copy_from_slice(
+                                &res.into_affine()
+                                    .x()
+                                    .expect("Should succeed")
+                                    .into_be_bytes32(),
+                            );
+                            memory[fmp as usize + 0xa0..fmp as usize + 0xc0].copy_from_slice(
+                                &res.into_affine()
+                                    .y()
+                                    .expect("Should succeed")
+                                    .into_be_bytes32(),
+                            );
                         }
                         0x01 => {
                             let mptr = lsb16(&data);
@@ -1731,10 +1766,11 @@ fn pairing_input_computations<H: CurveHooks>(
                             let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
                             scalars.push(Fr::ONE);
                             for _ in 1..num_commitments {
-                                scalars.push(*scalars.last().expect("Should always be non-empty") * s);
+                                scalars
+                                    .push(*scalars.last().expect("Should always be non-empty") * s);
                             }
 
-                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
+                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().map(|i| {
                                 if i == 0 {
                                     read_g1::<H>(memory, fmp as usize + 0x80).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
                                 } else {
@@ -1742,13 +1778,25 @@ fn pairing_input_computations<H: CurveHooks>(
                                 }
                             }).collect::<Result<Vec<_>, _>>()?;
 
-                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| VerifyError::OtherError {
-                                message: format!("MSM computation failed."),
+                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| {
+                                VerifyError::OtherError {
+                                    message: "MSM computation failed.".into(),
+                                }
                             })?;
 
                             // Write result of MSM computation into memory
-                            memory[fmp as usize + 0x80..fmp as usize + 0xa0].copy_from_slice(&res.into_affine().x().expect("Should succeed").into_be_bytes32());
-                            memory[fmp as usize + 0xa0..fmp as usize + 0xc0].copy_from_slice(&res.into_affine().y().expect("Should succeed").into_be_bytes32());
+                            memory[fmp as usize + 0x80..fmp as usize + 0xa0].copy_from_slice(
+                                &res.into_affine()
+                                    .x()
+                                    .expect("Should succeed")
+                                    .into_be_bytes32(),
+                            );
+                            memory[fmp as usize + 0xa0..fmp as usize + 0xc0].copy_from_slice(
+                                &res.into_affine()
+                                    .y()
+                                    .expect("Should succeed")
+                                    .into_be_bytes32(),
+                            );
                         }
                         other => {
                             return Err(VerifyError::OtherError {
@@ -3617,7 +3665,8 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
             challenge_len_data >>= 16;
             // Phase loop
             while proof_cptr < proof_cptr_end {
-                (proof_cptr, hash_mptr) = write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
+                (proof_cptr, hash_mptr) =
+                    write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
             }
 
             // Generate challenges
@@ -3632,11 +3681,12 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
             let num_challenges = lsb8(&challenge_len_data);
             challenge_len_data >>= 8;
             for _ in 1..num_challenges {
-                challenge_mptr = squeeze_challenge_cont(memory, vka_end, challenge_mptr).map_err(|_| {
-                    VerifyError::OtherError {
-                        message: "Failed to squeeze subsequent challenge".into(),
-                    }
-                })?;
+                challenge_mptr =
+                    squeeze_challenge_cont(memory, vka_end, challenge_mptr).map_err(|_| {
+                        VerifyError::OtherError {
+                            message: "Failed to squeeze subsequent challenge".into(),
+                        }
+                    })?;
             }
         }
         challenge_len_data = mload(memory, challenge_len_ptr as u32)
@@ -3659,30 +3709,29 @@ fn read_bdfg21_batch_opening_proof_and_generate_challenges<H: CurveHooks>(
     mut proof_cptr: usize,
 ) -> Result<(), VerifyError> {
     // zeta
-    (challenge_mptr, hash_mptr) = squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr).map_err(|_| {
-                    VerifyError::OtherError {
-                        message: "Failed to squeeze challenge".into(),
-                    }
-                })?;
+    (challenge_mptr, hash_mptr) = squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr)
+        .map_err(|_| VerifyError::OtherError {
+            message: "Failed to squeeze challenge".into(),
+        })?;
 
     // nu
     challenge_mptr = squeeze_challenge_cont(memory, vka_end, challenge_mptr).map_err(|_| {
-                    VerifyError::OtherError {
-                        message: "Failed to squeeze subsequent challenge".into(),
-                    }
-                })?;
+        VerifyError::OtherError {
+            message: "Failed to squeeze subsequent challenge".into(),
+        }
+    })?;
 
     // W
-    (proof_cptr, hash_mptr) = write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
-
+    (proof_cptr, hash_mptr) =
+        write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
 
     // mu
     (_, hash_mptr) =
-                squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr).map_err(|_| {
-                    VerifyError::OtherError {
-                        message: "Failed to squeeze challenge".into(),
-                    }
-                })?;
+        squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr).map_err(|_| {
+            VerifyError::OtherError {
+                message: "Failed to squeeze challenge".into(),
+            }
+        })?;
 
     // W'
     _ = write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
