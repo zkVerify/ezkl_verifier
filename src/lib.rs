@@ -19,7 +19,7 @@ use ark_bn254_ext::CurveHooks;
 use ark_ec::{AffineRepr, CurveGroup, pairing::Pairing};
 use ark_ff::{AdditiveGroup, BigInteger, Field, One, PrimeField, fields::batch_inversion};
 use ark_models_ext::bn::{G1Prepared, G2Prepared};
-use core::ops::BitAnd;
+use core::{iter, ops::BitAnd};
 use sha3::{Digest, Keccak256};
 
 use crate::{
@@ -1448,15 +1448,13 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             let mptr = lsb16(&data);
                             data >>= 16;
                             let mptr_end = lsb16(&data);
+                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
                             let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
 
-                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
-                            let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
-                            scalars.push(Fr::ONE);
-                            for _ in 1..num_commitments {
-                                scalars
-                                    .push(*scalars.last().expect("Should always be non-empty") * s);
-                            }
+                            let scalars: Vec<Fr> =
+                                iter::successors(Some(Fr::ONE), |prev| Some(*prev * s))
+                                    .take(num_commitments)
+                                    .collect();
 
                             let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().map(|i| {
                                 if i == 0 {
@@ -1490,15 +1488,13 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             let mptr = lsb16(&data);
                             data >>= 16;
                             let mptr_end = lsb16(&data);
+                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
                             let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
 
-                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
-                            let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
-                            scalars.push(Fr::ONE);
-                            for _ in 1..num_commitments {
-                                scalars
-                                    .push(*scalars.last().expect("Should always be non-empty") * s);
-                            }
+                            let scalars: Vec<Fr> =
+                                iter::successors(Some(Fr::ONE), |prev| Some(*prev * s))
+                                    .take(num_commitments)
+                                    .collect();
 
                             let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().map(|i| {
                                 if i == 0 {
@@ -1718,15 +1714,13 @@ fn pairing_input_computations<H: CurveHooks>(
                             let mptr = lsb16(&data);
                             data >>= 16;
                             let mptr_end = lsb16(&data);
+                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
                             let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
 
-                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
-                            let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
-                            scalars.push(Fr::ONE);
-                            for _ in 1..num_commitments {
-                                scalars
-                                    .push(*scalars.last().expect("Should always be non-empty") * s);
-                            }
+                            let scalars: Vec<Fr> =
+                                iter::successors(Some(Fr::ONE), |prev| Some(*prev * s))
+                                    .take(num_commitments)
+                                    .collect();
 
                             let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().map(|i| {
                                 if i == 0 {
@@ -1760,15 +1754,13 @@ fn pairing_input_computations<H: CurveHooks>(
                             let mptr = lsb16(&data);
                             data >>= 16;
                             let mptr_end = lsb16(&data);
+                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
                             let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
 
-                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
-                            let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
-                            scalars.push(Fr::ONE);
-                            for _ in 1..num_commitments {
-                                scalars
-                                    .push(*scalars.last().expect("Should always be non-empty") * s);
-                            }
+                            let scalars: Vec<Fr> =
+                                iter::successors(Some(Fr::ONE), |prev| Some(*prev * s))
+                                    .take(num_commitments)
+                                    .collect();
 
                             let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().map(|i| {
                                 if i == 0 {
