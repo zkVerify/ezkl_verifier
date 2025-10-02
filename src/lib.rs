@@ -91,7 +91,6 @@ fn verify_proof_inner<H: CurveHooks>(
         message: format!("Unable to parse vka_end as u32. Cause: {e}").to_string(),
     })? as usize;
     let mut hash_mptr = vka_end + 0x20;
-    // let instance_cptr := instances.offset
 
     // Check valid length of proof
     // success := and(success, eq(sub(instance_cptr, 0xa4), proof.length))
@@ -166,7 +165,7 @@ fn check_public_input_number(memory: &[u8], pubs: &Public) -> Result<(), VerifyE
 // and validate it.
 // Then, store it in (hash_mptr, hash_mptr + 0x20).
 // Return updated (success, proof_cptr, hash_mptr).
-pub(crate) fn write_ec_point_into_memory<H: CurveHooks>(
+fn write_ec_point_into_memory<H: CurveHooks>(
     proof: &[u8],
     memory: &mut Vec<u8>,
     proof_cptr: usize,
@@ -369,7 +368,6 @@ fn expression_evals_packed(
                     let (res1, res2, res3) = lookup_input_accum(
                         memory,
                         &expressions_word,
-                        // fsmp,
                         i as usize,
                         code_ptr,
                     )?;
@@ -405,7 +403,6 @@ fn expression_evals_packed(
 fn lookup_input_accum(
     memory: &[u8],
     expressions_word: &U256,
-    // fsmp: usize,
     i: usize,
     code_ptr: usize,
 ) -> Result<(usize, U256, Fr), VerifyError> {
@@ -793,7 +790,6 @@ fn mv_lookup_evals(
         // store ident in free static memory
         memory[j..j + 0x20].copy_from_slice(&ident.into_be_bytes32());
     }
-    // let lhs;
     let mut rhs = Fr::ZERO;
 
     if outer_inputs_len == 0x20 {
@@ -3077,8 +3073,8 @@ fn perform_pairing_input_computations<H: CurveHooks>(
             .into_u256();
         i += 0x20;
     }
-    // Load G1's SRS generator from the VKA into memory
 
+    // Load G1's SRS generator from the VKA into memory
     let idx1 = 0x01c0 + VKA_OFFSET + MEMORY_OFFSET; // g1_x index
     let idx2 = vka_end + 0x80;
     let g1_x_bytes = mload(memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
