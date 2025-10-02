@@ -1463,7 +1463,7 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
                             scalars.push(Fr::ONE);
                             for _ in 1..num_commitments {
-                                scalars.push(*scalars.last().expect("Should always be there") * s);
+                                scalars.push(*scalars.last().expect("Should always be non-empty") * s);
                             }
 
                             let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
@@ -1492,7 +1492,7 @@ fn pairing_input_computations_first<H: CurveHooks>(
                             let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
                             scalars.push(Fr::ONE);
                             for _ in 1..num_commitments {
-                                scalars.push(*scalars.last().expect("Should always be there") * s);
+                                scalars.push(*scalars.last().expect("Should always be non-empty") * s);
                             }
 
                             let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
@@ -1698,58 +1698,62 @@ fn pairing_input_computations<H: CurveHooks>(
                 0x0 => {
                     match ptr_loc {
                         0x00 => {
-                            let mut mptr = lsb16(&data);
+                            let mptr = lsb16(&data);
                             data >>= 16;
                             let mptr_end = lsb16(&data);
-                            while mptr_end < mptr {
-                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
-                                ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
-                                    message: format!(
-                                        "pairing_input_computations failed. Cause: {e}"
-                                    ),
-                                })?;
-                                let x = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, mptr as u32).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate x from memory. Cause: {e}")} })?,
-                                );
-                                let y = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, mptr as u32 + 0x20).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load coordinate y from memory. Cause: {e}")} })?,
-                                );
-                                ec_add_tmp::<H>(memory, &x, &y).map_err(|e| {
-                                    VerifyError::KeyError {
-                                        message: format!(
-                                            "pairing_input_computations failed. Cause: {e}"
-                                        ),
-                                    }
-                                })?;
-                                mptr -= 0x40;
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
+
+                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
+                            let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
+                            scalars.push(Fr::ONE);
+                            for _ in 1..num_commitments {
+                                scalars.push(*scalars.last().expect("Should always be non-empty") * s);
                             }
+
+                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
+                                if i == 0 {
+                                    read_g1::<H>(memory, fmp as usize + 0x80).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
+                                } else {
+                                    read_g1::<H>(memory, mptr - (i as usize - 1) * 0x40).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
+                                }
+                            }).collect::<Result<Vec<_>, _>>()?;
+
+                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| VerifyError::OtherError {
+                                message: format!("MSM computation failed."),
+                            })?;
+
+                            // Write result of MSM computation into memory
+                            memory[fmp as usize + 0x80..fmp as usize + 0xa0].copy_from_slice(&res.into_affine().x().expect("Should succeed").into_be_bytes32());
+                            memory[fmp as usize + 0xa0..fmp as usize + 0xc0].copy_from_slice(&res.into_affine().y().expect("Should succeed").into_be_bytes32());
                         }
                         0x01 => {
-                            let mut mptr = lsb16(&data);
+                            let mptr = lsb16(&data);
                             data >>= 16;
                             let mptr_end = lsb16(&data);
-                            while mptr_end < mptr {
-                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
-                                ec_mul_tmp::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
-                                    message: format!(
-                                        "pairing_input_computations failed. Cause: {e}"
-                                    ),
-                                })?;
-                                let x = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, mptr as u32).map_err(|e| { VerifyError::InvalidProofError { message: format!("pairing_input_computations failed to load coordinate x from the proof. Cause: {e}")} })?,
-                                );
-                                let y = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, mptr as u32 + 0x20).map_err(|e| { VerifyError::InvalidProofError { message: format!("pairing_input_computations failed to load coordinate y from the proof. Cause: {e}")} })?,
-                                );
-                                ec_add_tmp::<H>(memory, &x, &y).map_err(|e| {
-                                    VerifyError::KeyError {
-                                        message: format!(
-                                            "pairing_input_computations failed. Cause: {e}"
-                                        ),
-                                    }
-                                })?;
-                                mptr -= 0x40;
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| { VerifyError::KeyError { message: format!("pairing_input_computations failed to load scalar from memory. Cause: {e}")} })?.into_fr();
+
+                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
+                            let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
+                            scalars.push(Fr::ONE);
+                            for _ in 1..num_commitments {
+                                scalars.push(*scalars.last().expect("Should always be non-empty") * s);
                             }
+
+                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
+                                if i == 0 {
+                                    read_g1::<H>(memory, fmp as usize + 0x80).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
+                                } else {
+                                    read_g1::<H>(raw_proof, mptr - (i as usize - 1) * 0x40 - PROOF_OFFSET).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
+                                }
+                            }).collect::<Result<Vec<_>, _>>()?;
+
+                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| VerifyError::OtherError {
+                                message: format!("MSM computation failed."),
+                            })?;
+
+                            // Write result of MSM computation into memory
+                            memory[fmp as usize + 0x80..fmp as usize + 0xa0].copy_from_slice(&res.into_affine().x().expect("Should succeed").into_be_bytes32());
+                            memory[fmp as usize + 0xa0..fmp as usize + 0xc0].copy_from_slice(&res.into_affine().y().expect("Should succeed").into_be_bytes32());
                         }
                         other => {
                             return Err(VerifyError::OtherError {
@@ -3690,16 +3694,11 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
             let num_challenges = lsb8(&challenge_len_data);
             challenge_len_data >>= 8;
             for _ in 1..num_challenges {
-                match squeeze_challenge_cont(memory, vka_end, challenge_mptr) {
-                    Ok(new_challenge_mptr) => {
-                        challenge_mptr = new_challenge_mptr;
+                challenge_mptr = squeeze_challenge_cont(memory, vka_end, challenge_mptr).map_err(|_| {
+                    VerifyError::OtherError {
+                        message: "Failed to squeeze subsequent challenge".into(),
                     }
-                    Err(_) => {
-                        return Err(VerifyError::OtherError {
-                            message: "Failed to squeeze subsequent challenge.".to_string(),
-                        });
-                    }
-                };
+                })?;
             }
         }
         challenge_len_data = mload(memory, challenge_len_ptr as u32)
@@ -3722,64 +3721,33 @@ fn read_bdfg21_batch_opening_proof_and_generate_challenges<H: CurveHooks>(
     mut proof_cptr: usize,
 ) -> Result<(), VerifyError> {
     // zeta
-    match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
-        Ok((new_challenge_mptr, new_hash_mptr)) => {
-            challenge_mptr = new_challenge_mptr;
-            hash_mptr = new_hash_mptr;
-        }
-        Err(_) => {
-            return Err(VerifyError::OtherError {
-                message: "Failed to squeeze challenge.".to_string(),
-            });
-        }
-    };
+    (challenge_mptr, hash_mptr) = squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr).map_err(|_| {
+                    VerifyError::OtherError {
+                        message: "Failed to squeeze challenge".into(),
+                    }
+                })?;
 
     // nu
-    match squeeze_challenge_cont(memory, vka_end, challenge_mptr) {
-        Ok(new_challenge_mptr) => {
-            challenge_mptr = new_challenge_mptr;
-        }
-        Err(_) => {
-            return Err(VerifyError::OtherError {
-                message: "Failed to squeeze subsequent challenge.".to_string(),
-            });
-        }
-    };
+    challenge_mptr = squeeze_challenge_cont(memory, vka_end, challenge_mptr).map_err(|_| {
+                    VerifyError::OtherError {
+                        message: "Failed to squeeze subsequent challenge".into(),
+                    }
+                })?;
 
     // W
-    match write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr) {
-        Ok((new_proof_cptr, new_hash_mptr)) => {
-            proof_cptr = new_proof_cptr;
-            hash_mptr = new_hash_mptr;
-        }
-        Err(e) => {
-            return Err(e);
-        }
-    };
+    (proof_cptr, hash_mptr) = write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
+
 
     // mu
-    match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
-        Ok((new_challenge_mptr, new_hash_mptr)) => {
-            _ = new_challenge_mptr;
-            hash_mptr = new_hash_mptr;
-        }
-        Err(_) => {
-            return Err(VerifyError::OtherError {
-                message: "Failed to squeeze challenge.".to_string(),
-            });
-        }
-    };
+    (_, hash_mptr) =
+                squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr).map_err(|_| {
+                    VerifyError::OtherError {
+                        message: "Failed to squeeze challenge".into(),
+                    }
+                })?;
 
     // W'
-    match write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr) {
-        Ok((new_proof_cptr, new_hash_mptr)) => {
-            _ = new_proof_cptr;
-            _ = new_hash_mptr;
-        }
-        Err(e) => {
-            return Err(e);
-        }
-    };
+    _ = write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
 
     Ok(())
 }
