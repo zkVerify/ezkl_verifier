@@ -1179,7 +1179,6 @@ fn coeff_computations(
         0x01 => {
             // We only encode the points if the coeff length is greater than 1.
             // Otherwise, we just encode the mu_minus_point and coeff ptr.
-            // mstore(add(and(shr(16, coeff_data), PTR_BITMASK), mload(0x40)), mod(mload(add(and(coeff_data, PTR_BITMASK), mload(0x40))), R))
             let idx = lsb16(&(coeff_data >> 16)) + fmp as usize;
             let val = mload(memory, lsb16(&coeff_data) as u32 + fmp)
                 .map_err(|e| VerifyError::KeyError {
@@ -1419,7 +1418,7 @@ fn pairing_input_computations_first<H: CurveHooks>(
     let fmp = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to read fmp from memory at this point."),
     );
-    // mstore(mload(0x40), calldataload(and(data, PTR_BITMASK)))
+
     let idx = fmp as usize;
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| {
         VerifyError::InvalidProofError {
@@ -1431,7 +1430,7 @@ fn pairing_input_computations_first<H: CurveHooks>(
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
-    // mstore(add(0x20, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
+
     let idx = 0x20 + fmp as usize;
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| {
         VerifyError::InvalidProofError {
@@ -1664,7 +1663,7 @@ fn pairing_input_computations<H: CurveHooks>(
     let fmp = u32_from_be_tail(
         &mload(memory, 0x40).expect("Should be able to read fmp from memory at this point."),
     );
-    // mstore(add(0x80, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
+
     let idx = 0x80 + fmp as usize;
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| {
         VerifyError::InvalidProofError {
@@ -1676,7 +1675,7 @@ fn pairing_input_computations<H: CurveHooks>(
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
     data >>= 16;
-    // mstore(add(0xa0, mload(0x40)), calldataload(and(data, PTR_BITMASK)))
+
     let idx = 0xa0 + fmp as usize;
     let bytes = load_from_proof(raw_proof, lsb16(&data) as u32).map_err(|e| {
         VerifyError::InvalidProofError {
@@ -1989,13 +1988,13 @@ fn compute_lagrange_and_instance_evaluation(
     }
 
     while mptr < mptr_end {
-        memory[mptr..mptr + 32].copy_from_slice(&(x - pow_of_omega).into_be_bytes32()); // mstore(mptr, addmod(x, sub(R, pow_of_omega),R))
+        memory[mptr..mptr + 32].copy_from_slice(&(x - pow_of_omega).into_be_bytes32());
         pow_of_omega *= omega;
         mptr += 0x20;
     }
 
     let x_n_minus_1 = x_n - Fr::ONE;
-    memory[mptr_end..mptr_end + 32].copy_from_slice(&x_n_minus_1.into_be_bytes32()); // mstore(mptr_end, x_n_minus_1)
+    memory[mptr_end..mptr_end + 32].copy_from_slice(&x_n_minus_1.into_be_bytes32());
 
     batch_invert_in_memory(memory, x_n_mptr as u32, mptr_end as u32 + 0x20).map_err(|e| {
         VerifyError::KeyError {
@@ -2015,7 +2014,6 @@ fn compute_lagrange_and_instance_evaluation(
         })?
         .into_fr();
     for mptr in (x_n_mptr..mptr_end).step_by(0x20) {
-        // mstore(mptr, mulmod(l_i_common, mulmod(mload(mptr), pow_of_omega,R),R))
         let zeta_minus_omega_i_inv = mload(memory, mptr as u32)
             .map_err(|e| VerifyError::KeyError {
                 message: format!("Unable to read zeta_minus_omega_i_inv from memory. Cause: {e}"),
@@ -2074,26 +2072,20 @@ fn compute_lagrange_and_instance_evaluation(
         })?
         .into_fr();
 
-    // mstore(x_n_mptr, x_n)
     memory[x_n_mptr..x_n_mptr + 0x20].copy_from_slice(&x_n.into_be_bytes32());
 
-    // mstore(add(theta_mptr, 0x1a0), x_n_minus_1_inv)
     let mut start = theta_mptr + 0x1a0;
     memory[start..start + 0x20].copy_from_slice(&x_n_minus_1_inv.into_be_bytes32());
 
-    // mstore(add(theta_mptr, 0x1c0), l_last)
     start += 0x20;
     memory[start..start + 0x20].copy_from_slice(&l_last.into_be_bytes32());
 
-    // mstore(add(theta_mptr, 0x1e0), l_blind)
     start += 0x20;
     memory[start..start + 0x20].copy_from_slice(&l_blind.into_be_bytes32());
 
-    // mstore(add(theta_mptr, 0x200), l_0)
     start += 0x20;
     memory[start..start + 0x20].copy_from_slice(&l_0.into_be_bytes32());
 
-    // mstore(add(theta_mptr, 0x220), instance_eval)
     start += 0x20;
     memory[start..start + 0x20].copy_from_slice(&instance_eval.into_be_bytes32());
 
@@ -2300,7 +2292,6 @@ fn perform_lookup_computations(
     mut quotient_eval_numer: Fr,
     y: Fr,
 ) -> Result<Fr, VerifyError> {
-    // mstore(vka_end, mload(add(theta_mptr, 0x1C0)))
     let value = &mload(memory, theta_mptr as u32 + 0x1c0).map_err(|e| VerifyError::KeyError {
         message: format!(
             "perform_lookup_computations failed to read l_last from memory. Cause: {e}"
@@ -2308,13 +2299,11 @@ fn perform_lookup_computations(
     })?;
     memory[vka_end..vka_end + 0x20].copy_from_slice(value); // l_last
 
-    // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x200)))
     let value = &mload(memory, theta_mptr as u32 + 0x200).map_err(|e| VerifyError::KeyError {
         message: format!("perform_lookup_computations failed to read l_0 from memory. Cause: {e}"),
     })?;
     memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(value); // l_0
 
-    // mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x1E0)))
     let value = &mload(memory, theta_mptr as u32 + 0x1e0).map_err(|e| VerifyError::KeyError {
         message: format!(
             "perform_lookup_computations failed to read l_blind from memory. Cause: {e}"
@@ -2322,7 +2311,6 @@ fn perform_lookup_computations(
     })?;
     memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(value); // l_blind
 
-    // mstore(add(0x60, vka_end), mload(theta_mptr))
     let value = &mload(memory, theta_mptr as u32).map_err(|e| VerifyError::KeyError {
         message: format!(
             "perform_lookup_computations failed to read theta from memory. Cause: {e}"
@@ -2330,7 +2318,6 @@ fn perform_lookup_computations(
     })?;
     memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(value); // theta
 
-    // mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x20)))
     let value = &mload(memory, theta_mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError {
         message: format!("perform_lookup_computations failed to read beta from memory. Cause: {e}"),
     })?;
@@ -2364,7 +2351,6 @@ fn perform_lookup_computations(
                 }
             }
             0x1 => {
-                // mstore(add(0xA0, vka_end), mload(add(theta_mptr, 0x40)))
                 let bytes = mload(memory, theta_mptr as u32 + 0x40).map_err(|e| VerifyError::KeyError { message: format!("perform_lookup_computations was unable to read data from memory. Cause: {e}") })?;
                 memory[vka_end..vka_end + 0xa0].copy_from_slice(&bytes); // gamma
 
@@ -2419,7 +2405,6 @@ fn perform_quotient_evaluation(
         y,
     )?;
 
-    // mstore(add(theta_mptr, 0x240), mulmod(quotient_eval_numer, mload(add(theta_mptr, 0x1a0)), R))
     let idx = theta_mptr + 0x240;
     let val = quotient_eval_numer * mload(memory, theta_mptr as u32 + 0x1a0).map_err(|e| VerifyError::KeyError { message: format!("Failed to read scalar from memory at the end of permutation computations phase. Cause: {e}" )})?.into_fr();
     memory[idx..(idx + 0x20)].copy_from_slice(&val.into_be_bytes32());
@@ -2447,10 +2432,9 @@ fn compute_quotient_commitment<H: CurveHooks>(
     .map_err(|e| VerifyError::InvalidProofError {
         message: format!("Unable to load last_quotient_x from proof. Cause: {e}"),
     })?;
-    // mstore(vka_end, calldataload(mload(0x03a0)))
+
     memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
 
-    // mstore(add(0x20, vka_end), calldataload(add(mload(0x03a0), 0x20)))
     let bytes = load_from_proof(
         raw_proof,
         mload_u32(memory, last_quotient_x_cptr as u32).map_err(|e| VerifyError::KeyError {
@@ -2497,11 +2481,9 @@ fn compute_quotient_commitment<H: CurveHooks>(
         memory.extend_from_slice(&[0u8; 32]);
     }
 
-    // mstore(add(theta_mptr, 0x260), mload(vka_end))
     let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end during the quotient commitment computation phase. Cause: {e}") })?;
     memory[(theta_mptr + 0x260)..(theta_mptr + 0x260 + 0x20)].copy_from_slice(&bytes);
 
-    // mstore(add(theta_mptr, 0x280), mload(add(0x20, vka_end)))
     let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to read from memory at index vka_end + 0x20 during the quotient commitment computation phase. Cause: {e}") })?;
     memory[(theta_mptr + 0x280)..(theta_mptr + 0x280 + 0x20)].copy_from_slice(&bytes);
 
@@ -2561,7 +2543,6 @@ fn perform_point_computations(
         })?
         .into_u256();
     // Store interm point
-    // mstore(add(and(point_computations, PTR_BITMASK), vka_end), x)
     let idx = vka_end + lsb16(&point_computations);
     memory[idx..idx + 0x20].copy_from_slice(&x.into_be_bytes32());
 
@@ -2619,7 +2600,6 @@ fn perform_vanishing_computations(
                 ),
             })?
             .into_fr();
-        // mstore(add(vka_end, mptr), val);
         memory[idx..idx + 0x20].copy_from_slice(&val.into_be_bytes32());
 
         mptr += 0x20;
@@ -2652,7 +2632,6 @@ fn perform_vanishing_computations(
             .into_u256();
     }
     let mut diff_ptr = vka_end + lsb16(&vanishing_computations);
-    // mstore(diff_ptr, s)
     memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&s.into_be_bytes32());
 
     vanishing_computations >>= 16;
@@ -2682,11 +2661,9 @@ fn perform_vanishing_computations(
             vanishing_computations >>= 16;
         }
         diff_ptr += 0x20;
-        // mstore(diff_ptr, diff)
         memory[diff_ptr..diff_ptr + 0x20].copy_from_slice(&diff.into_be_bytes32());
 
         if i == 0 {
-            // mstore(vka_end, diff)
             memory[vka_end..vka_end + 0x20].copy_from_slice(&diff.into_be_bytes32());
         }
         pcs_ptr += 0x20;
@@ -2768,12 +2745,10 @@ fn perform_normalized_coeff_computations(
     let mptr0 = lsb16(&norm_coeff_data) + vka_end;
     norm_coeff_data >>= 16;
 
-    // mstore(mptr0, diff_0_inv)
     memory[mptr0..mptr0 + 0x20].copy_from_slice(&diff_0_inv.into_be_bytes32());
 
     let mptr_end = mptr0 + lsb16(&norm_coeff_data);
     for mptr in ((mptr0 + 0x20)..mptr_end).step_by(0x20) {
-        // mstore(mptr, mulmod(mload(mptr), diff_0_inv, R))
         let val = mload(memory, mptr as u32).map_err(|e| VerifyError::KeyError {
                     message: format!("Unable to load scalar from memory during normalized_coeff_computations. Cause: {e}"),
                 })?.into_fr() * diff_0_inv;
@@ -2841,7 +2816,6 @@ fn perform_r_evals_computations(
                 set_coeff += 0x20;
             }
             not_first = true;
-            // mstore(r_eval_mptr, r_eval)
             memory[r_eval_mptr..r_eval_mptr + 0x20].copy_from_slice(&r_eval.into_be_bytes32());
             r_eval_mptr += 0x20;
         }
@@ -2892,11 +2866,10 @@ fn perform_coeff_sums_computation(
                             "Unable to update sum during coeff_sums_computation. Cause: {e}"
                         ),
                     })?
-                    .into_fr(); // TODO: DOUBLE-CHECK: (coeff_ptr + j) as u32 fits into a `u32`
+                    .into_fr(); // TODO: ensure (coeff_ptr + j) as u32 fits into a `u32`
             }
             coeff_ptr += len;
             let idx = lsb16(&coeff_sums_data) + vka_end;
-            // mstore(idx, sum)
             memory[idx..idx + 0x20].copy_from_slice(&sum.into_be_bytes32());
             coeff_sums_data >>= 16;
         }
@@ -2930,7 +2903,6 @@ fn perform_r_eval_computation(
     r_eval_data >>= 16;
     let mut sum_mptr = lsb16(&r_eval_data) + vka_end;
     while mptr < mptr_end {
-        // mstore(mptr, mload(sum_mptr))
         let bytes = mload(memory, sum_mptr as u32).map_err(|e| VerifyError::KeyError {
             message: format!(
                 "Unable to load scalar from memory during r_eval_computation. Cause: {e}"
@@ -2987,7 +2959,6 @@ fn perform_r_eval_computation(
         sum_inv_mptr -= 0x20;
         r_eval_mptr -= 0x20;
     }
-    // mstore(add(theta_mptr, 0x2A0), r_eval)
     let idx = theta_mptr + 0x2a0;
 
     while idx >= memory.len() {
@@ -3108,7 +3079,6 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     }
     // Load G1's SRS generator from the VKA into memory
 
-    // mstore(add(0x80, vka_end), mload(0x0260))
     let idx1 = 0x01c0 + VKA_OFFSET + MEMORY_OFFSET; // g1_x index
     let idx2 = vka_end + 0x80;
     let g1_x_bytes = mload(memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
@@ -3116,7 +3086,6 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     })?;
     memory[idx2..idx2 + 0x20].copy_from_slice(&g1_x_bytes);
 
-    // mstore(add(0xa0, vka_end), mload(0x0280))
     let idx1 = 0x01e0 + VKA_OFFSET + MEMORY_OFFSET; // g1_y index
     let idx2 = vka_end + 0xa0;
     let g1_y_bytes = mload(memory, idx1 as u32).map_err(|e| VerifyError::KeyError {
@@ -3152,7 +3121,6 @@ fn perform_pairing_input_computations<H: CurveHooks>(
         message: format!("perform_pairing_input_computations failed. Cause: {e}"),
     })?;
 
-    // mstore(add(0x80, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
     let idx = 0x80 + vka_end;
     let bytes = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(|e| {
         VerifyError::InvalidProofError {
@@ -3165,7 +3133,6 @@ fn perform_pairing_input_computations<H: CurveHooks>(
 
     ec_points_cptr_packed >>= 16;
 
-    // mstore(add(0xa0, vka_end), calldataload(and(ec_points_cptr_packed, PTR_BITMASK)))
     let idx = 0xa0 + vka_end;
     let bytes = load_from_proof(raw_proof, lsb16(&ec_points_cptr_packed) as u32).map_err(|e| {
         VerifyError::InvalidProofError {
@@ -3224,11 +3191,10 @@ fn perform_pairing_input_computations<H: CurveHooks>(
                 message: format!("Unable to load w_prime_y from proof. Cause: {e}"),
             }
         })?;
-    // mstore(add(0x80, vka_end), w_prime_x)
+
     let idx = 0x80 + vka_end;
     memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
 
-    // mstore(add(0xa0, vka_end), w_prime_y)
     let idx = 0xa0 + vka_end;
     memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
 
@@ -3264,7 +3230,6 @@ fn perform_pairing_input_computations<H: CurveHooks>(
         memory.extend_from_slice(&[0u8; 32]);
     }
 
-    // mstore(add(theta_mptr, 0x2C0), mload(vka_end))
     let idx = theta_mptr + 0x2c0;
     let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
         message: format!(
@@ -3273,7 +3238,6 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
-    // mstore(add(theta_mptr, 0x2E0), mload(add(0x20, vka_end)))
     let idx = theta_mptr + 0x2e0;
     let bytes = mload(memory, 0x20 + vka_end as u32).map_err(|e| VerifyError::KeyError {
         message: format!(
@@ -3282,11 +3246,9 @@ fn perform_pairing_input_computations<H: CurveHooks>(
     })?;
     memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
-    // mstore(add(theta_mptr, 0x300), w_prime_x)
     let idx = theta_mptr + 0x300;
     memory[idx..idx + 0x20].copy_from_slice(&w_prime_x);
 
-    // mstore(add(theta_mptr, 0x320), w_prime_y)
     let idx = theta_mptr + 0x320;
     memory[idx..idx + 0x20].copy_from_slice(&w_prime_y);
 
@@ -3336,7 +3298,6 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
         .is_zero();
 
     if has_accumulator {
-        //     mstore(add(0x00, vka_end), mload(add(theta_mptr, 0x100)))
         let mut bytes =
             mload(memory, theta_mptr as u32 + 0x100).map_err(|e| VerifyError::KeyError {
                 message: format!(
@@ -3344,37 +3305,30 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
                 ),
             })?;
         memory[vka_end..(vka_end + 0x20)].copy_from_slice(&bytes);
-        //     mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x120)))
         bytes = mload(memory, theta_mptr as u32 + 0x120).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
         })?;
         memory[(vka_end + 0x20)..(vka_end + 0x40)].copy_from_slice(&bytes);
-        //     mstore(add(0x40, vka_end), mload(add(theta_mptr, 0x140)))
         bytes = mload(memory, theta_mptr as u32 + 0x140).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
         })?;
         memory[(vka_end + 0x40)..(vka_end + 0x60)].copy_from_slice(&bytes);
-        //     mstore(add(0x60, vka_end), mload(add(theta_mptr, 0x160)))
         bytes = mload(memory, theta_mptr as u32 + 0x160).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
         })?;
         memory[(vka_end + 0x60)..(vka_end + 0x80)].copy_from_slice(&bytes);
-        //     mstore(add(0x80, vka_end), mload(add(theta_mptr, 0x2c0)))
         bytes = mload(memory, theta_mptr as u32 + 0x2c0).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
         })?;
         memory[(vka_end + 0x80)..(vka_end + 0xa0)].copy_from_slice(&bytes);
-        //     mstore(add(0xa0, vka_end), mload(add(theta_mptr, 0x2e0)))
         bytes = mload(memory, theta_mptr as u32 + 0x2e0).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
         })?;
         memory[(vka_end + 0xa0)..(vka_end + 0xc0)].copy_from_slice(&bytes);
-        //     mstore(add(0xc0, vka_end), mload(add(theta_mptr, 0x300)))
         bytes = mload(memory, theta_mptr as u32 + 0x300).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
         })?;
         memory[(vka_end + 0xc0)..(vka_end + 0xe0)].copy_from_slice(&bytes);
-        //     mstore(add(0xe0, vka_end), mload(add(theta_mptr, 0x320)))
         bytes = mload(memory, theta_mptr as u32 + 0x320).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
         })?;
@@ -3412,14 +3366,13 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
         ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
             message: format!("random_linear_combine_with_accumulator failed. Cause: {e}"),
         })?;
-        // mstore(add(theta_mptr, 0x2c0), mload(vka_end))
+
         let idx = theta_mptr + 0x2c0;
         let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
         })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
-        // mstore(add(theta_mptr, 0x2e0), mload(add(0x20, vka_end)))
         let idx = theta_mptr + 0x2e0;
         let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
@@ -3427,7 +3380,6 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
         // [pairing_rhs] += challenge * [acc_rhs]
-        // mstore(vka_end, mload(add(theta_mptr, 0x140)))
         let idx = vka_end;
         let bytes =
             mload(memory, theta_mptr as u32 + 0x140).map_err(|e| VerifyError::KeyError {
@@ -3437,7 +3389,6 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
             })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
-        // mstore(add(0x20, vka_end), mload(add(theta_mptr, 0x160)))
         let idx = vka_end + 0x20;
         let bytes =
             mload(memory, theta_mptr as u32 + 0x160).map_err(|e| VerifyError::KeyError {
@@ -3467,14 +3418,13 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
         ec_add_acc::<H>(memory, &x, &y).map_err(|e| VerifyError::KeyError {
             message: format!("random_linear_combine_with_accumulator failed. Cause: {e}"),
         })?;
-        // mstore(add(theta_mptr, 0x300), mload(vka_end))
+
         let idx = theta_mptr + 0x300;
         let bytes = mload(memory, vka_end as u32).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
         })?;
         memory[idx..idx + 0x20].copy_from_slice(&bytes);
 
-        // mstore(add(theta_mptr, 0x320), mload(add(0x20, vka_end)))
         let idx = theta_mptr + 0x320;
         let bytes = mload(memory, vka_end as u32 + 0x20).map_err(|e| VerifyError::KeyError {
             message: format!("Unable to read from memory during random linear combine. Cause: {e}"),
@@ -3754,7 +3704,7 @@ fn read_accumulator_from_instances(memory: &mut [u8]) -> Result<(), VerifyError>
         .is_zero();
 
     if has_accumulator {
-        // TODO: Replace with actual logic
+        // TODO: Implement logic for accumulator
         Err(VerifyError::OtherError {
             message: "Accumulators currently not supported.".to_string(),
         })
