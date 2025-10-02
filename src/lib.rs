@@ -3679,17 +3679,12 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
             }
 
             // Generate challenges
-            match squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr) {
-                Ok((new_challenge_mptr, new_hash_mptr)) => {
-                    challenge_mptr = new_challenge_mptr;
-                    hash_mptr = new_hash_mptr;
-                }
-                Err(_) => {
-                    return Err(VerifyError::OtherError {
-                        message: "Failed to squeeze challenge.".to_string(),
-                    });
-                }
-            };
+            (challenge_mptr, hash_mptr) =
+                squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr).map_err(|_| {
+                    VerifyError::OtherError {
+                        message: "Failed to squeeze challenge".into(),
+                    }
+                })?;
 
             // Continue squeezing challenges based on num_challenges
             let num_challenges = lsb8(&challenge_len_data);
