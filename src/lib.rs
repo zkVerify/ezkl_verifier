@@ -630,7 +630,6 @@ fn col_evals(
 
             z >>= 40;
 
-            // mstore(mload(0x40), mulmod(mload(mload(0x40)), DELTA, R))
             let idx = fmp as usize;
             let val = DELTA
                 * mload(memory, fmp)
@@ -1040,7 +1039,6 @@ fn point_rots(
     for i in 0..values_max_rot {
         let value = lsb16(&pcs_computations);
         if value != 0 {
-            // mstore(add(vka_end, value), x_pow_of_omega)
             let idx = vka_end + value;
             memory[idx..idx + 0x20].copy_from_slice(&x_pow_of_omega.into_be_bytes32());
         }
@@ -1456,58 +1454,62 @@ fn pairing_input_computations_first<H: CurveHooks>(
                 0x0 => {
                     match ptr_loc {
                         0x0 => {
-                            let mut mptr = lsb16(&data);
+                            let mptr = lsb16(&data);
                             data >>= 16;
                             let mptr_end = lsb16(&data);
-                            while mptr_end < mptr {
-                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
-                                ec_mul_acc::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
-                                    message: format!(
-                                        "pairing_input_computations_first failed. Cause: {e}"
-                                    ),
-                                })?;
-                                let x = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, mptr as u32).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate x from memory. Cause: {e}") })?,
-                                );
-                                let y = Fq::from_be_bytes_mod_order(
-                                    &mload(memory, mptr as u32 + 0x20).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load coordinate y from memory. Cause: {e}") })?,
-                                );
-                                ec_add_acc::<H>(memory, &x, &y).map_err(|e| {
-                                    VerifyError::KeyError {
-                                        message: format!(
-                                            "pairing_input_computations_first failed. Cause: {e}"
-                                        ),
-                                    }
-                                })?;
-                                mptr -= 0x40;
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
+
+                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
+                            let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
+                            scalars.push(Fr::ONE);
+                            for _ in 1..num_commitments {
+                                scalars.push(*scalars.last().expect("Should always be there") * s);
                             }
+
+                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
+                                if i == 0 {
+                                    read_g1::<H>(memory, fmp as usize).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
+                                } else {
+                                    read_g1::<H>(memory, mptr - (i as usize - 1) * 0x40).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
+                                }
+                            }).collect::<Result<Vec<_>, _>>()?;
+
+                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| VerifyError::OtherError {
+                                message: format!("MSM computation failed."),
+                            })?;
+
+                            // Write result of MSM computation into memory
+                            memory[fmp as usize..fmp as usize + 0x20].copy_from_slice(&res.into_affine().x().expect("Should succeed").into_be_bytes32());
+                            memory[fmp as usize + 0x20..fmp as usize + 0x40].copy_from_slice(&res.into_affine().y().expect("Should succeed").into_be_bytes32());
                         }
                         0x1 => {
-                            let mut mptr = lsb16(&data);
+                            let mptr = lsb16(&data);
                             data >>= 16;
                             let mptr_end = lsb16(&data);
-                            while mptr_end < mptr {
-                                let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
-                                ec_mul_acc::<H>(memory, &s).map_err(|e| VerifyError::KeyError {
-                                    message: format!(
-                                        "pairing_input_computations_first failed. Cause: {e}"
-                                    ),
-                                })?;
-                                let x = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, mptr as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("pairing_input_computations_first failed to load coordinate x from the proof. Cause: {e}") })?,
-                                );
-                                let y = Fq::from_be_bytes_mod_order(
-                                    &load_from_proof(raw_proof, (mptr + 0x20) as u32).map_err(|e| VerifyError::InvalidProofError { message: format!("pairing_input_computations_first failed to load coordinate y from the proof. Cause: {e}") })?,
-                                );
-                                ec_add_acc::<H>(memory, &x, &y).map_err(|e| {
-                                    VerifyError::KeyError {
-                                        message: format!(
-                                            "pairing_input_computations_first failed. Cause: {e}"
-                                        ),
-                                    }
-                                })?;
-                                mptr -= 0x40;
+                            let s = mload(memory, theta_mptr + 0xa0).map_err(|e| VerifyError::KeyError { message: format!("pairing_input_computations_first failed to load scalar from memory. Cause: {e}") })?.into_fr();
+
+                            let num_commitments = (mptr - mptr_end) / 0x40 + 1;
+                            let mut scalars: Vec<Fr> = Vec::with_capacity(num_commitments);
+                            scalars.push(Fr::ONE);
+                            for _ in 1..num_commitments {
+                                scalars.push(*scalars.last().expect("Should always be there") * s);
                             }
+
+                            let commitments: Vec<G1<H>> = (0..num_commitments as u32).rev().into_iter().map(|i| { 
+                                if i == 0 {
+                                    read_g1::<H>(memory, fmp as usize).map_err(|e| VerifyError::KeyError { message: format!("Unable to load G1 point from memory during MSM computation. Cause: {e}") })
+                                } else {
+                                    read_g1::<H>(raw_proof, mptr - (i as usize - 1) * 0x40 - PROOF_OFFSET).map_err(|e| VerifyError::InvalidProofError { message: format!("Unable to load G1 point from proof during MSM computation. Cause: {e}") })
+                                }
+                            }).collect::<Result<Vec<_>, _>>()?;
+
+                            let res = H::bn254_msm_g1(&commitments, &scalars).map_err(|_| VerifyError::OtherError {
+                                message: format!("MSM computation failed."),
+                            })?;
+
+                            // Write result of MSM computation into memory
+                            memory[fmp as usize..fmp as usize + 0x20].copy_from_slice(&res.into_affine().x().expect("Should succeed").into_be_bytes32());
+                            memory[fmp as usize + 0x20..fmp as usize + 0x40].copy_from_slice(&res.into_affine().y().expect("Should succeed").into_be_bytes32());
                         }
                         other => {
                             return Err(VerifyError::OtherError {
@@ -3671,7 +3673,7 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
                         hash_mptr = new_hash_mptr;
                     }
                     Err(e) => {
-                        return Err(e); // TODO: Rework to use better error propagation
+                        return Err(e);
                     }
                 };
             }
