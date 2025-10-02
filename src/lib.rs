@@ -3671,15 +3671,7 @@ fn read_instances_and_witness_commitments_and_generate_challenges<H: CurveHooks>
             challenge_len_data >>= 16;
             // Phase loop
             while proof_cptr < proof_cptr_end {
-                match write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr) {
-                    Ok((new_proof_cptr, new_hash_mptr)) => {
-                        proof_cptr = new_proof_cptr;
-                        hash_mptr = new_hash_mptr;
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                };
+                (proof_cptr, hash_mptr) = write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
             }
 
             // Generate challenges
