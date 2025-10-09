@@ -49,7 +49,7 @@ fn valid_raw_proof() -> [u8; 1248] {
 }
 
 #[fixture]
-fn valid_raw_proof_mv_lookups() -> [u8; 4192] {
+fn valid_raw_proof_alt() -> [u8; 4192] {
     hex_literal::hex!(
         "
         1e0ff5a23b912883beb838cb9d9144ea8d2c607f66707422e3f8df11e3c2519e
@@ -277,7 +277,7 @@ fn valid_vka() -> [u8; 2592] {
 }
 
 #[fixture]
-fn valid_vka_mv_lookups() -> [u8; 6144] {
+fn valid_vka_alt() -> [u8; 6144] {
     hex_literal::hex!(
         "
         0f41e6fcae328e0eddb49f370df008a8b9f8a3aba7e2399cb3f54273ecfefdfa
@@ -493,7 +493,7 @@ fn valid_instances() -> [PublicInput; 10] {
 }
 
 #[fixture]
-fn valid_instances_mv_lookups() -> [PublicInput; 4] {
+fn valid_instances_alt() -> [PublicInput; 4] {
     [
         hex_literal::hex!("0000000000000000000000000000000000000000000000000000000000000c91"),
         hex_literal::hex!("30644e72e131a029b85045b68181585d2833e84879b9709143e1f593effff370"),
@@ -512,19 +512,12 @@ fn verify_valid_proof(
 }
 
 #[rstest]
-fn verify_valid_proof_with_mv_lookups(
-    valid_vka_mv_lookups: [u8; 6144],
-    valid_raw_proof_mv_lookups: [u8; 4192],
-    valid_instances_mv_lookups: [PublicInput; 4],
+fn verify_valid_proof_with_alt(
+    valid_vka_alt: [u8; 6144],
+    valid_raw_proof_alt: [u8; 4192],
+    valid_instances_alt: [PublicInput; 4],
 ) {
-    assert!(
-        verify::<()>(
-            &valid_vka_mv_lookups,
-            &valid_raw_proof_mv_lookups,
-            &valid_instances_mv_lookups
-        )
-        .is_ok()
-    )
+    assert!(verify::<()>(&valid_vka_alt, &valid_raw_proof_alt, &valid_instances_alt).is_ok())
 }
 
 mod reject {
@@ -532,14 +525,14 @@ mod reject {
 
     #[rstest]
     fn a_proof_with_non_matching_number_of_instances(
-        valid_vka_mv_lookups: [u8; 6144],
-        valid_raw_proof_mv_lookups: [u8; 4192],
-        _valid_instances_mv_lookups: [PublicInput; 4],
+        valid_vka_alt: [u8; 6144],
+        valid_raw_proof_alt: [u8; 4192],
+        _valid_instances_alt: [PublicInput; 4],
     ) {
         let invalid_instances: [PublicInput; 0] = [];
 
         assert_eq!(
-            verify::<()>(&valid_vka_mv_lookups, &valid_raw_proof_mv_lookups, &invalid_instances).unwrap_err(),
+            verify::<()>(&valid_vka_alt, &valid_raw_proof_alt, &invalid_instances).unwrap_err(),
             VerifyError::PublicInputError {
                 message: "Number of instances provided does not match those in the vka. Given: 0; Expected: 4".to_string()
             }
@@ -548,20 +541,15 @@ mod reject {
 
     #[rstest]
     fn a_proof_with_no_number_of_instances_in_vka(
-        valid_vka_mv_lookups: [u8; 6144],
-        valid_raw_proof_mv_lookups: [u8; 4192],
-        valid_instances_mv_lookups: [PublicInput; 4],
+        valid_vka_alt: [u8; 6144],
+        valid_raw_proof_alt: [u8; 4192],
+        valid_instances_alt: [PublicInput; 4],
     ) {
         let new_length = 0x20;
-        let invalid_vka: Vec<u8> = valid_vka_mv_lookups[..new_length].to_vec();
+        let invalid_vka: Vec<u8> = valid_vka_alt[..new_length].to_vec();
 
         assert_eq!(
-            verify::<()>(
-                &invalid_vka,
-                &valid_raw_proof_mv_lookups,
-                &valid_instances_mv_lookups
-            )
-            .unwrap_err(),
+            verify::<()>(&invalid_vka, &valid_raw_proof_alt, &valid_instances_alt).unwrap_err(),
             VerifyError::KeyError {
                 message: format!(
                     "Unable to retrieve number of instances from the VKA. Cause: mload failed. Attempted to access index: {}, while memory length is: {}",
@@ -574,19 +562,14 @@ mod reject {
 
     #[rstest]
     fn a_proof_with_empty_vka(
-        _valid_vka_mv_lookups: [u8; 6144],
-        valid_raw_proof_mv_lookups: [u8; 4192],
-        valid_instances_mv_lookups: [PublicInput; 4],
+        _valid_vka_alt: [u8; 6144],
+        valid_raw_proof_alt: [u8; 4192],
+        valid_instances_alt: [PublicInput; 4],
     ) {
         let invalid_vka: [u8; 0] = [];
 
         assert_eq!(
-            verify::<()>(
-                &invalid_vka,
-                &valid_raw_proof_mv_lookups,
-                &valid_instances_mv_lookups
-            )
-            .unwrap_err(),
+            verify::<()>(&invalid_vka, &valid_raw_proof_alt, &valid_instances_alt).unwrap_err(),
             VerifyError::KeyError {
                 message: "vk length must be a positive multiple of 32".to_string()
             }
@@ -594,22 +577,49 @@ mod reject {
     }
 
     #[rstest]
+    fn an_empty_proof(
+        valid_vka_alt: [u8; 6144],
+        _valid_raw_proof_alt: [u8; 4192],
+        valid_instances_alt: [PublicInput; 4],
+    ) {
+        let invalid_raw_proof: [u8; 0] = [];
+
+        assert_eq!(
+            verify::<()>(&valid_vka_alt, &invalid_raw_proof, &valid_instances_alt).unwrap_err(),
+            VerifyError::InvalidProofError {
+                message: "proof length must be a positive multiple of 32".to_string()
+            }
+        );
+    }
+
+    #[rstest]
     fn a_proof_with_vka_whose_length_is_not_a_multiple_of_32(
-        _valid_vka_mv_lookups: [u8; 6144],
-        valid_raw_proof_mv_lookups: [u8; 4192],
-        valid_instances_mv_lookups: [PublicInput; 4],
+        _valid_vka_alt: [u8; 6144],
+        valid_raw_proof_alt: [u8; 4192],
+        valid_instances_alt: [PublicInput; 4],
     ) {
         let invalid_vka: [u8; 31] = [0; 31];
 
         assert_eq!(
-            verify::<()>(
-                &invalid_vka,
-                &valid_raw_proof_mv_lookups,
-                &valid_instances_mv_lookups
-            )
-            .unwrap_err(),
+            verify::<()>(&invalid_vka, &valid_raw_proof_alt, &valid_instances_alt).unwrap_err(),
             VerifyError::KeyError {
                 message: "vk length must be a positive multiple of 32".to_string()
+            }
+        );
+    }
+
+    #[rstest]
+    fn a_proof_whose_length_is_not_a_multiple_of_32(
+        valid_vka_alt: [u8; 6144],
+        _valid_raw_proof_alt: [u8; 4192],
+        valid_instances_alt: [PublicInput; 4],
+    ) {
+        let invalid_raw_proof: [u8; 31] = [0; 31];
+
+        assert_eq!(
+            verify::<()>(&valid_vka_alt, &invalid_raw_proof, &valid_instances_alt).unwrap_err(),
+            VerifyError::InvalidProofError {
+                message: "proof length must be a positive multiple of 32".to_string()
             }
         );
     }

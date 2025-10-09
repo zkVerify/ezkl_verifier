@@ -63,6 +63,12 @@ pub fn verify<H: CurveHooks>(
         });
     }
 
+    if raw_proof.is_empty() || raw_proof.len() & 0x1f != 0 {
+        return Err(VerifyError::InvalidProofError {
+            message: "proof length must be a positive multiple of 32".to_string(),
+        });
+    }
+
     // Compute and store the vka_end into memory
     memory.extend_from_slice(
         &(raw_vka.len() + MEMORY_OFFSET)
