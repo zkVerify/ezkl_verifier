@@ -568,7 +568,7 @@ mod reject {
             verify::<()>(&invalid_vka, &valid_raw_proof_alt, &valid_instances_alt).unwrap_err(),
             VerifyError::KeyError {
                 message: format!(
-                    "Unable to retrieve number of instances from the VKA. Cause: mload failed. Attempted to access index: {}, while memory length is: {}",
+                    "check_public_input_number: load num_instances_in_vka. Cause: mload failed. Attempted to access index: {}, while memory length is: {}",
                     0x40 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32,
                     MEMORY_OFFSET + invalid_vka.len()
                 )

@@ -84,7 +84,7 @@ pub enum GroupError {
         actual_length: usize,
         expected_length: usize,
     },
-    /// Provided slice is too short.
+    /// Point is not on the curve.
     NotOnCurve,
 }
 

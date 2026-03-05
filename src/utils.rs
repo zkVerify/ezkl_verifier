@@ -15,7 +15,7 @@
 // limitations under the License.
 
 use crate::constants::MAX_U32;
-use crate::errors::{GroupError, UtilityError};
+use crate::errors::{GroupError, UtilityError, VerifyError};
 use crate::{BYTE_FLAG_BITMASK, G2, PROOF_OFFSET, PTR_BITMASK};
 use crate::{EVMWord, Fq, Fr, U256, errors::FieldError, types::G1};
 use alloc::{format, string::String};
@@ -302,4 +302,32 @@ pub(crate) fn u32_from_be_tail(bytes: &EVMWord) -> u32 {
 pub(crate) fn to_hex_string(data: &[u8]) -> String {
     let hex_string: String = data.iter().map(|b| format!("{b:02x}")).collect();
     format!("0x{hex_string}")
+}
+
+/// Load an EVMWord from memory, mapping the error to a VerifyError::KeyError.
+pub(crate) fn mload_key(memory: &[u8], addr: u32, context: &str) -> Result<EVMWord, VerifyError> {
+    mload(memory, addr).map_err(|e| VerifyError::KeyError {
+        message: format!("{context}. Cause: {e}"),
+    })
+}
+
+/// Load an Fr scalar from memory.
+pub(crate) fn mload_fr(memory: &[u8], addr: u32, context: &str) -> Result<Fr, VerifyError> {
+    Ok(mload_key(memory, addr, context)?.into_fr())
+}
+
+/// Load an Fq element from memory (big-endian bytes mod order).
+pub(crate) fn mload_fq(memory: &[u8], addr: u32, context: &str) -> Result<Fq, VerifyError> {
+    Ok(Fq::from_be_bytes_mod_order(&mload_key(memory, addr, context)?))
+}
+
+/// Load an EVMWord from the proof, mapping the error to a VerifyError::InvalidProofError.
+pub(crate) fn load_proof_key(
+    raw_proof: &[u8],
+    addr: u32,
+    context: &str,
+) -> Result<EVMWord, VerifyError> {
+    load_from_proof(raw_proof, addr).map_err(|e| VerifyError::InvalidProofError {
+        message: format!("{context}. Cause: {e}"),
+    })
 }
