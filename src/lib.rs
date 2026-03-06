@@ -600,6 +600,42 @@ fn lookup_expr_evals_packed(
     }
 }
 
+/// Computes the RHS accumulator for multi-input MV lookups (outer_inputs_len > 0x20).
+/// Each input set contributes a product of the other sets' values, accumulated into rhs,
+/// then multiplied by the table evaluation.
+pub(crate) fn compute_multi_input_rhs(
+    memory: &mut [u8],
+    fmp: u32,
+    outer_inputs_len: usize,
+    table: Fr,
+) -> Result<Fr, VerifyError> {
+    let mut rhs = Fr::ZERO;
+    let last_idx = outer_inputs_len - 0x20;
+    for i in (0..outer_inputs_len).step_by(0x20) {
+        let mut tmp = mload_fr(memory, 0xa0 + fmp, "mv_lookup_evals: load outer tmp")?;
+        let mut j = 0x20;
+        if i == 0 {
+            tmp = mload_fr(memory, 0xc0 + fmp, "mv_lookup_evals: load outer tmp i=0")?;
+            j = 0x40;
+        }
+        while j < outer_inputs_len {
+            if i != j {
+                tmp *= mload_fr(
+                    memory,
+                    j as u32 + 0xa0 + fmp,
+                    "mv_lookup_evals: update outer tmp",
+                )?;
+            }
+            j += 0x20;
+        }
+        rhs += tmp;
+        if i == last_idx {
+            rhs *= table;
+        }
+    }
+    Ok(rhs)
+}
+
 fn mv_lookup_evals(
     memory: &mut [u8],
     raw_proof: &[u8],
@@ -663,33 +699,11 @@ fn mv_lookup_evals(
         // store ident in free static memory
         memory[j..j + 0x20].copy_from_slice(&ident.into_be_bytes32());
     }
-    let mut rhs = Fr::ZERO;
-
-    if outer_inputs_len == 0x20 {
-        rhs = table;
+    let mut rhs = if outer_inputs_len == 0x20 {
+        table
     } else {
-        // iterate through the outer_inputs_len
-        let last_idx = outer_inputs_len - 0x20;
-        for i in (0..outer_inputs_len).step_by(0x20) {
-            let mut tmp = mload_fr(memory, 0xa0 + fmp, "mv_lookup_evals: load outer tmp")?;
-            let mut j = 0x20;
-            if i == 0 {
-                tmp = mload_fr(memory, 0xc0 + fmp, "mv_lookup_evals: load outer tmp i=0")?;
-                j = 0x40;
-            }
-            while j < outer_inputs_len {
-                if i == j {
-                    continue;
-                }
-                tmp *= mload_fr(memory, j as u32 + 0xa0 + fmp, "mv_lookup_evals: update outer tmp")?;
-                j += 0x20;
-            }
-            rhs += tmp;
-            if i == last_idx {
-                rhs *= table;
-            }
-        }
-    }
+        compute_multi_input_rhs(memory, fmp, outer_inputs_len, table)?
+    };
 
     let mut tmp = mload_fr(memory, 0xa0 + fmp, "mv_lookup_evals: load tmp product")?;
     for j in (0x20..outer_inputs_len).step_by(0x20) {
