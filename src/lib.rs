@@ -753,13 +753,11 @@ fn lookup_evals(
                 .into_fr()
                 .neg_in_place();
 
-    quotient_eval_numer = quotient_eval_numer * y
-        + mload_fr(memory, fmp, "lookup_evals: load l_blind")?
-            * load_proof_key(raw_proof, z, "lookup_evals: load z eval sq1")?.into_fr()
-            * load_proof_key(raw_proof, z, "lookup_evals: load z eval sq2")?.into_fr()
-        + load_proof_key(raw_proof, z, "lookup_evals: load z eval neg")?
-            .into_fr()
-            .neg_in_place();
+    {
+        let l_blind = mload_fr(memory, fmp, "lookup_evals: load l_blind")?;
+        let z_eval = load_proof_key(raw_proof, z, "lookup_evals: load z eval")?.into_fr();
+        quotient_eval_numer = quotient_eval_numer * y + l_blind * (z_eval * z_eval - z_eval);
+    }
 
     // load in the lookup_table_lines from the evals_ptr
     evals_ptr += 0x20;
@@ -1907,7 +1905,7 @@ fn perform_lookup_computations(
             }
             0x1 => {
                 let bytes = mload_key(memory, theta_mptr as u32 + 0x40, "lookup: load gamma")?;
-                memory[vka_end..vka_end + 0xa0].copy_from_slice(&bytes); // gamma
+                memory[vka_end + 0xa0..vka_end + 0xa0 + 0x20].copy_from_slice(&bytes); // gamma
 
                 while evals_ptr < end_ptr as usize {
                     (evals_ptr, table, quotient_eval_numer) =
