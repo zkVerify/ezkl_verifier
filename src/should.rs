@@ -1153,3 +1153,53 @@ fn verify_valid_proof_with_standard_lookup() {
     let result = verify::<()>(vka, proof, &instances);
     assert!(result.is_ok(), "Standard lookup verification failed: {result:?}");
 }
+
+/// Test that exercises pairing_input_computations with small Calldata comm groups.
+/// The circuit has 2 advice + 2 fixed columns at rot {0}, creating rotation set {0}
+/// with Calldata comm groups of size 1-2 (ptr_loc=0x01, comm_len=0x01/0x02).
+#[test]
+fn verify_valid_proof_with_small_calldata_comm_groups() {
+    let vka = include_bytes!("../examples/small_comm_group/vka.bin");
+    let proof = include_bytes!("../examples/small_comm_group/proof.bin");
+    let instances_bytes = include_bytes!("../examples/small_comm_group/instances.bin");
+
+    let instances: Vec<PublicInput> = instances_bytes
+        .chunks_exact(32)
+        .map(|chunk| {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(chunk);
+            arr
+        })
+        .collect();
+
+    let result = verify::<()>(vka, proof, &instances);
+    assert!(
+        result.is_ok(),
+        "Small calldata comm group verification failed: {result:?}"
+    );
+}
+
+/// Test that exercises pairing_input_computations with small Memory comm groups.
+/// Circuit has NO fixed columns and NO lookups — only 2 permutation comms (Memory)
+/// in set {0}, forming a group of size 2 → ptr_loc=0x00, comm_len=0x02.
+#[test]
+fn verify_valid_proof_with_small_memory_comm_groups() {
+    let vka = include_bytes!("../examples/no_fixed/vka.bin");
+    let proof = include_bytes!("../examples/no_fixed/proof.bin");
+    let instances_bytes = include_bytes!("../examples/no_fixed/instances.bin");
+
+    let instances: Vec<PublicInput> = instances_bytes
+        .chunks_exact(32)
+        .map(|chunk| {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(chunk);
+            arr
+        })
+        .collect();
+
+    let result = verify::<()>(vka, proof, &instances);
+    assert!(
+        result.is_ok(),
+        "Small memory comm group verification failed: {result:?}"
+    );
+}
