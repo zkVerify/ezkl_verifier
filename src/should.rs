@@ -1203,3 +1203,161 @@ fn verify_valid_proof_with_small_memory_comm_groups() {
         "Small memory comm group verification failed: {result:?}"
     );
 }
+
+/// Unit test for pairing_input_computations with ptr_loc=0x00 (Memory comms),
+/// comm_len=0x01. This branch is structurally unreachable via real circuits
+/// because the codegen always orders Calldata comms before Memory comms,
+/// making it impossible for a non-first rotation set to have its last comm
+/// from Calldata while also containing Memory comms. We test it directly
+/// with crafted inputs.
+#[test]
+fn pairing_input_computations_memory_comm_len_1() {
+    use crate::utils::IntoBEBytes32;
+    use ark_bn254::g1::Config;
+    use ark_ec::short_weierstrass::Affine;
+
+    let g1 = Affine::<Config>::generator();
+    let g1_x_bytes = g1.x().unwrap().into_be_bytes32();
+    let g1_y_bytes = g1.y().unwrap().into_be_bytes32();
+
+    // Use 2*G as the comm point to add
+    let g1_2 = (g1 + g1).into();
+    let g1_2: Affine<Config> = g1_2;
+    let g2_x_bytes = g1_2.x().unwrap().into_be_bytes32();
+    let g2_y_bytes = g1_2.y().unwrap().into_be_bytes32();
+
+    // Memory layout constants
+    let vka_end: u32 = 0x200;
+    let theta_mptr: u32 = 0x100;
+    // nu at theta_mptr + 0xa0 = 0x1a0
+    let nu_addr: usize = 0x1a0;
+    // Working point at vka_end + 0x80 = 0x280
+    let work_point: usize = 0x280;
+    // Comm point x,y stored at arbitrary memory addresses
+    let comm_x_addr: u32 = 0x300;
+    let comm_y_addr: u32 = 0x320;
+
+    let mut memory = vec![0u8; 0x400];
+
+    // Store vka_end at memory[0x40] (32-byte big-endian)
+    memory[0x5c..0x60].copy_from_slice(&vka_end.to_be_bytes());
+
+    // Store nu = 1 at nu_addr (Fr::ONE in big-endian)
+    let nu_bytes = crate::types::Fr::from(1u64).into_be_bytes32();
+    memory[nu_addr..nu_addr + 0x20].copy_from_slice(&nu_bytes);
+
+    // Store G1 generator as working point at vka_end+0x80
+    memory[work_point..work_point + 0x20].copy_from_slice(&g1_x_bytes);
+    memory[work_point + 0x20..work_point + 0x40].copy_from_slice(&g1_y_bytes);
+
+    // Store 2*G coords at comm_x_addr, comm_y_addr
+    memory[comm_x_addr as usize..comm_x_addr as usize + 0x20].copy_from_slice(&g2_x_bytes);
+    memory[comm_y_addr as usize..comm_y_addr as usize + 0x20].copy_from_slice(&g2_y_bytes);
+
+    // Build raw_proof with initial point (G1 generator) at a known offset
+    // load_proof_key loads from raw_proof[addr - PROOF_OFFSET]
+    // We'll use addr = PROOF_OFFSET (0x84) so it reads from raw_proof[0]
+    let initial_x_cptr: u16 = 0x84;
+    let initial_y_cptr: u16 = 0xa4;
+    let mut raw_proof = vec![0u8; 0x60];
+    raw_proof[0x00..0x20].copy_from_slice(&g1_x_bytes);
+    raw_proof[0x20..0x40].copy_from_slice(&g1_y_bytes);
+
+    // Build data U256:
+    // bits [0..16]:  initial_x_cptr
+    // bits [16..32]: initial_y_cptr
+    // bits [32..40]: ptr_loc = 0x00 (Memory)
+    // bits [40..48]: comm_len = 0x01
+    // bits [48..64]: comm_x_addr
+    // bits [64..80]: comm_y_addr
+    let data = U256::from(initial_x_cptr as u64)
+        | (U256::from(initial_y_cptr as u64) << 16)
+        | (U256::from(0x00u64) << 32)  // ptr_loc = 0x00
+        | (U256::from(0x01u64) << 40)  // comm_len = 0x01
+        | (U256::from(comm_x_addr as u64) << 48)
+        | (U256::from(comm_y_addr as u64) << 64);
+
+    let result = crate::pairing_input_computations::<()>(
+        &mut memory,
+        &raw_proof,
+        0x20, // len = one word
+        0,    // pcs_ptr (unused for data already provided)
+        data,
+        theta_mptr,
+    );
+
+    assert!(result.is_ok(), "pairing_input_computations with ptr_loc=0x00, comm_len=1 failed: {result:?}");
+}
+
+/// Same as above but with comm_len=0x02 to also cover the inner
+/// `if comm_len == 0x2` block (lines 1479-1496).
+#[test]
+fn pairing_input_computations_memory_comm_len_2() {
+    use crate::utils::IntoBEBytes32;
+    use ark_bn254::g1::Config;
+    use ark_ec::short_weierstrass::Affine;
+
+    let g1 = Affine::<Config>::generator();
+    let g1_x_bytes = g1.x().unwrap().into_be_bytes32();
+    let g1_y_bytes = g1.y().unwrap().into_be_bytes32();
+
+    let g1_2: Affine<Config> = (g1 + g1).into();
+    let g2_x_bytes = g1_2.x().unwrap().into_be_bytes32();
+    let g2_y_bytes = g1_2.y().unwrap().into_be_bytes32();
+
+    let g1_3: Affine<Config> = (g1 + g1 + g1).into();
+    let g3_x_bytes = g1_3.x().unwrap().into_be_bytes32();
+    let g3_y_bytes = g1_3.y().unwrap().into_be_bytes32();
+
+    let vka_end: u32 = 0x200;
+    let theta_mptr: u32 = 0x100;
+    let nu_addr: usize = 0x1a0;
+    let work_point: usize = 0x280;
+    let comm1_x: u32 = 0x300;
+    let comm1_y: u32 = 0x320;
+    let comm2_x: u32 = 0x340;
+    let comm2_y: u32 = 0x360;
+
+    let mut memory = vec![0u8; 0x400];
+
+    memory[0x5c..0x60].copy_from_slice(&vka_end.to_be_bytes());
+
+    let nu_bytes = crate::types::Fr::from(1u64).into_be_bytes32();
+    memory[nu_addr..nu_addr + 0x20].copy_from_slice(&nu_bytes);
+
+    memory[work_point..work_point + 0x20].copy_from_slice(&g1_x_bytes);
+    memory[work_point + 0x20..work_point + 0x40].copy_from_slice(&g1_y_bytes);
+
+    memory[comm1_x as usize..comm1_x as usize + 0x20].copy_from_slice(&g2_x_bytes);
+    memory[comm1_y as usize..comm1_y as usize + 0x20].copy_from_slice(&g2_y_bytes);
+    memory[comm2_x as usize..comm2_x as usize + 0x20].copy_from_slice(&g3_x_bytes);
+    memory[comm2_y as usize..comm2_y as usize + 0x20].copy_from_slice(&g3_y_bytes);
+
+    let mut raw_proof = vec![0u8; 0x60];
+    raw_proof[0x00..0x20].copy_from_slice(&g1_x_bytes);
+    raw_proof[0x20..0x40].copy_from_slice(&g1_y_bytes);
+
+    let initial_x_cptr: u16 = 0x84;
+    let initial_y_cptr: u16 = 0xa4;
+
+    // data: initial point | ptr_loc=0x00, comm_len=0x02 | comm1 x,y | comm2 x,y
+    let data = U256::from(initial_x_cptr as u64)
+        | (U256::from(initial_y_cptr as u64) << 16)
+        | (U256::from(0x00u64) << 32)  // ptr_loc = 0x00
+        | (U256::from(0x02u64) << 40)  // comm_len = 0x02
+        | (U256::from(comm1_x as u64) << 48)
+        | (U256::from(comm1_y as u64) << 64)
+        | (U256::from(comm2_x as u64) << 80)
+        | (U256::from(comm2_y as u64) << 96);
+
+    let result = crate::pairing_input_computations::<()>(
+        &mut memory,
+        &raw_proof,
+        0x20,
+        0,
+        data,
+        theta_mptr,
+    );
+
+    assert!(result.is_ok(), "pairing_input_computations with ptr_loc=0x00, comm_len=2 failed: {result:?}");
+}

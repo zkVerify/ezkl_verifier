@@ -1342,7 +1342,7 @@ fn pairing_input_computations_first<H: CurveHooks>(
 }
 
 // Perform subsequent computations in preparation for the pairing check.
-fn pairing_input_computations<H: CurveHooks>(
+pub(crate) fn pairing_input_computations<H: CurveHooks>(
     memory: &mut [u8],
     raw_proof: &[u8],
     len: u32,
