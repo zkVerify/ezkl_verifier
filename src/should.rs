@@ -1361,3 +1361,28 @@ fn pairing_input_computations_memory_comm_len_2() {
 
     assert!(result.is_ok(), "pairing_input_computations with ptr_loc=0x00, comm_len=2 failed: {result:?}");
 }
+
+/// End-to-end test with accumulator-enabled circuit.
+/// Exercises read_accumulator_from_instances (limb reconstruction + curve validation)
+/// and random_linear_combine_with_accumulator (lines 2555-2616).
+/// Fixture: circuit with 16 instances encoding 2 G1 accumulator points via AccumulatorEncoding(0, 4, 68).
+#[test]
+fn verify_valid_proof_with_accumulator() {
+    let vka = include_bytes!("../examples/accumulator/vka.bin");
+    let proof = include_bytes!("../examples/accumulator/proof.bin");
+    let instances_bytes = include_bytes!("../examples/accumulator/instances.bin");
+
+    let instances: Vec<PublicInput> = instances_bytes
+        .chunks_exact(32)
+        .map(|chunk| {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(chunk);
+            arr
+        })
+        .collect();
+
+    assert_eq!(instances.len(), 16, "Expected 16 instances for accumulator (4 coords × 4 limbs)");
+
+    let result = verify::<()>(vka, proof, &instances);
+    assert!(result.is_ok(), "Accumulator verification failed: {result:?}");
+}

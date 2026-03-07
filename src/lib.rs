@@ -153,7 +153,14 @@ fn verify_proof_inner<H: CurveHooks>(
         proof_cptr,
     )?;
 
-    read_accumulator_from_instances(memory)?;
+    // Ensure memory is large enough for accumulator operations:
+    // - read_accumulator needs theta_mptr + 0x180
+    // - random_linear_combine keccak needs 2*vka_end + 0x100
+    let required = core::cmp::max(theta_mptr + 0x180, 2 * vka_end + 0x100);
+    if memory.len() < required {
+        memory.resize(required, 0);
+    }
+    read_accumulator_from_instances(memory, pubs, theta_mptr)?;
 
     compute_lagrange_and_instance_evaluation(memory, pubs, theta_mptr)?;
     perform_quotient_evaluation(memory, raw_proof, vka_end, theta_mptr)?;
@@ -2837,20 +2844,91 @@ fn read_bdfg21_batch_opening_proof_and_generate_challenges<H: CurveHooks>(
     Ok(())
 }
 
-// Read accumulator from instances
-fn read_accumulator_from_instances(memory: &mut [u8]) -> Result<(), VerifyError> {
+// Read accumulator from instances.
+// Reconstructs two G1 points (lhs, rhs) from limb-encoded public inputs
+// and stores their coordinates at theta_mptr + {0x100, 0x120, 0x140, 0x160}.
+fn read_accumulator_from_instances(
+    memory: &mut [u8],
+    pubs: &Public,
+    theta_mptr: usize,
+) -> Result<(), VerifyError> {
     let has_accumulator = !mload_key(memory, 0x0140 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32, "verify: load has_accumulator")?
         .into_u256()
         .is_zero();
 
     if has_accumulator {
-        // TODO: Implement logic for accumulator
-        Err(VerifyError::OtherError {
-            message: "Accumulators currently not supported.".to_string(),
-        })
-    } else {
-        Ok(())
+        let acc_offset = mload_u32(memory, 0x0160 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("read_accumulator: load acc_offset failed. Cause: {e}"),
+            })? as usize;
+        let num_limbs = mload_u32(memory, 0x0180 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("read_accumulator: load num_limbs failed. Cause: {e}"),
+            })? as usize;
+        let num_limb_bits = mload_u32(memory, 0x01a0 + VKA_OFFSET as u32 + MEMORY_OFFSET as u32)
+            .map_err(|e| VerifyError::KeyError {
+                message: format!("read_accumulator: load num_limb_bits failed. Cause: {e}"),
+            })? as usize;
+
+        // Reconstruct 4 coordinates from instance limbs
+        // Instance layout: [lhs_x limbs | lhs_y limbs | rhs_x limbs | rhs_y limbs]
+        let coords = reconstruct_accumulator_coords(pubs, acc_offset, num_limbs, num_limb_bits)?;
+
+        // Validate both points are on the BN254 curve: y² = x³ + 3
+        let three = Fq::from(3u64);
+        for (label, x, y) in [("lhs", coords[0], coords[1]), ("rhs", coords[2], coords[3])] {
+            if y * y != x * x * x + three {
+                return Err(VerifyError::OtherError {
+                    message: format!("Accumulator {label} point is not on the BN254 curve"),
+                });
+            }
+        }
+
+        // Store at theta_mptr + {0x100, 0x120, 0x140, 0x160}
+        for (coord, off) in coords.iter().zip([0x100, 0x120, 0x140, 0x160]) {
+            let idx = theta_mptr + off;
+            memory[idx..idx + 0x20].copy_from_slice(&coord.into_be_bytes32());
+        }
     }
+
+    Ok(())
+}
+
+// Reconstruct 4 Fq coordinates (lhs_x, lhs_y, rhs_x, rhs_y) from limb-encoded instances.
+fn reconstruct_accumulator_coords(
+    pubs: &Public,
+    acc_offset: usize,
+    num_limbs: usize,
+    num_limb_bits: usize,
+) -> Result<[Fq; 4], VerifyError> {
+    let mut coords = [Fq::ZERO; 4];
+
+    for (coord_idx, coord) in coords.iter_mut().enumerate() {
+        let base = acc_offset + coord_idx * num_limbs;
+        let mut value = U256::from(0u64);
+
+        for limb_idx in 0..num_limbs {
+            let inst_idx = base + limb_idx;
+            if inst_idx >= pubs.len() {
+                return Err(VerifyError::PublicInputError {
+                    message: format!(
+                        "Accumulator requires instance index {inst_idx} but only {} instances provided",
+                        pubs.len()
+                    ),
+                });
+            }
+            let limb = pubs[inst_idx].into_u256() << (limb_idx * num_limb_bits) as u32;
+            value |= limb;
+        }
+
+        *coord = Fq::from_bigint(value).ok_or_else(|| VerifyError::OtherError {
+            message: format!(
+                "Accumulator coordinate {coord_idx} exceeds the BN254 base field modulus"
+            ),
+        })?;
+    }
+
+    Ok(coords)
 }
 
 #[cfg(test)]
