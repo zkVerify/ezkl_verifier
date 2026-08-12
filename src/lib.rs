@@ -835,16 +835,15 @@ fn mv_lookup_evals(
                 j = 0x40;
             }
             while j < outer_inputs_len {
-                if i == j {
-                    continue;
+                if i != j {
+                    tmp *= mload(memory, j as u32 + 0xa0 + fmp)
+                        .map_err(|e| VerifyError::KeyError {
+                            message: format!(
+                                "mv_lookup_evals was unable to load data from memory. Cause: {e}"
+                            ),
+                        })?
+                        .into_fr();
                 }
-                tmp *= mload(memory, j as u32 + 0xa0 + fmp)
-                    .map_err(|e| VerifyError::KeyError {
-                        message: format!(
-                            "mv_lookup_evals was unable to load data from memory. Cause: {e}"
-                        ),
-                    })?
-                    .into_fr();
                 j += 0x20;
             }
             rhs += tmp;
