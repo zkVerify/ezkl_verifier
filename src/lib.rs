@@ -114,9 +114,6 @@ fn verify_proof_inner<H: CurveHooks>(
     })? as usize;
     let mut hash_mptr = vka_end + 0x20;
 
-    // Check valid length of proof
-    // success := and(success, eq(sub(instance_cptr, 0xa4), proof.length))
-
     let (
         theta_mptr,
         mut challenge_mptr,
@@ -143,7 +140,7 @@ fn verify_proof_inner<H: CurveHooks>(
     (proof_cptr, hash_mptr) =
         read_evaluations(memory, raw_proof, proof_cptr, hash_mptr, num_evals)?;
 
-    read_bdfg21_batch_opening_proof_and_generate_challenges::<H>(
+    proof_cptr = read_bdfg21_batch_opening_proof_and_generate_challenges::<H>(
         memory,
         raw_proof,
         vka_end,
@@ -151,6 +148,16 @@ fn verify_proof_inner<H: CurveHooks>(
         hash_mptr,
         proof_cptr,
     )?;
+
+    if proof_cptr - PROOF_OFFSET != raw_proof.len() {
+        return Err(VerifyError::InvalidProofError {
+            message: format!(
+                "Length mismatch: read {} != got {}",
+                proof_cptr - PROOF_OFFSET,
+                raw_proof.len()
+            ),
+        });
+    }
 
     read_accumulator_from_instances(memory)?;
 
@@ -792,9 +799,7 @@ fn mv_lookup_evals(
     let outer_inputs_len = lsb16(&input_expression);
     input_expression >>= 16;
     // shift up the inputs iterator by the free static memory offset of 0xa0
-    for j in
-        ((0xa0 + fmp as usize)..(outer_inputs_len as usize + 0xa0 + fmp as usize)).step_by(0x20)
-    {
+    for j in ((0xa0 + fmp as usize)..(outer_inputs_len + 0xa0 + fmp as usize)).step_by(0x20) {
         // call the expression_evals function to evaluate the input_lines
         let ident: Fr;
         (evals_ptr, input_expression, ident) = lookup_expr_evals_packed(
@@ -2409,7 +2414,7 @@ fn perform_lookup_computations(
             }
             0x1 => {
                 let bytes = mload(memory, theta_mptr as u32 + 0x40).map_err(|e| VerifyError::KeyError { message: format!("perform_lookup_computations was unable to read data from memory. Cause: {e}") })?;
-                memory[vka_end..vka_end + 0xa0].copy_from_slice(&bytes); // gamma
+                memory[vka_end + 0xa0..vka_end + 0xa0 + 0x20].copy_from_slice(&bytes); // gamma
 
                 while evals_ptr < end_ptr as usize {
                     (evals_ptr, table, quotient_eval_numer) =
@@ -3392,6 +3397,9 @@ fn random_linear_combine_with_accumulator<H: CurveHooks>(
         memory[(vka_end + 0xe0)..(vka_end + 0x100)].copy_from_slice(&bytes);
 
         // let challenge := mod(keccak256(vka_end, add(0x100, vka_end)), R)
+        // the following is the faithful translation of the solidity code, which is broken.
+        // This code might panic; it is unreachable anyway for the time being (no has_accumulator),
+        // and also we do not introduce hacky workarounds for erroneous upstream code.
         let challenge = {
             let start = vka_end;
             let end = vka_end + 0x100 + vka_end;
@@ -3535,8 +3543,9 @@ fn pairing_check<H: CurveHooks>(memory: &mut [u8], theta_mptr: usize) -> Result<
 
     let g2_x_1_index = 0x0200 + VKA_OFFSET + MEMORY_OFFSET;
     let data = &memory[g2_x_1_index..g2_x_1_index + 4 * 0x20];
-    let h1 = read_g2::<H>(data).expect("Parsing the SRS point should always work");
-    // TODO: VALIDATION REQUIRED!
+    let h1 = read_g2::<H>(data).map_err(|e| VerifyError::KeyError {
+        message: format!("Unable to parse the G2 SRS point from the VKA. Cause: {e}"),
+    })?;
     // mstore(add(0x40, vka_end), mload( {{ vk_const_offsets["g2_x_1"]|hex() }}))
     // mstore(add(0x60, vka_end), mload( {{ vk_const_offsets["g2_x_2"]|hex() }}))
     // mstore(add(0x80, vka_end), mload( {{ vk_const_offsets["g2_y_1"]|hex() }}))
@@ -3544,8 +3553,9 @@ fn pairing_check<H: CurveHooks>(memory: &mut [u8], theta_mptr: usize) -> Result<
 
     let neg_s_g2_x_1_index = 0x0280 + VKA_OFFSET + MEMORY_OFFSET;
     let data = &memory[neg_s_g2_x_1_index..neg_s_g2_x_1_index + 4 * 0x20];
-    let h2 = read_g2::<H>(data).expect("Parsing the SRS point should always work");
-    // TODO: VALIDATION REQUIRED!
+    let h2 = read_g2::<H>(data).map_err(|e| VerifyError::KeyError {
+        message: format!("Unable to parse the neg_s G2 SRS point from the VKA. Cause: {e}"),
+    })?;
     // mstore(add(0x100, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_1"]|hex() }}))
     // mstore(add(0x120, vka_end), mload( {{ vk_const_offsets["neg_s_g2_x_2"]|hex() }}))
     // mstore(add(0x140, vka_end), mload( {{ vk_const_offsets["neg_s_g2_y_1"]|hex() }}))
@@ -3720,7 +3730,7 @@ fn read_bdfg21_batch_opening_proof_and_generate_challenges<H: CurveHooks>(
     mut challenge_mptr: usize,
     mut hash_mptr: usize,
     mut proof_cptr: usize,
-) -> Result<(), VerifyError> {
+) -> Result<usize, VerifyError> {
     // zeta
     (challenge_mptr, hash_mptr) = squeeze_challenge(memory, vka_end, challenge_mptr, hash_mptr)
         .map_err(|_| VerifyError::OtherError {
@@ -3747,9 +3757,9 @@ fn read_bdfg21_batch_opening_proof_and_generate_challenges<H: CurveHooks>(
         })?;
 
     // W'
-    _ = write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
+    (proof_cptr, _) = write_ec_point_into_memory::<H>(raw_proof, memory, proof_cptr, hash_mptr)?;
 
-    Ok(())
+    Ok(proof_cptr)
 }
 
 // Read accumulator from instances
