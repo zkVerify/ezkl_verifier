@@ -485,6 +485,12 @@ fn z_evals(
 ) -> Result<Fr, VerifyError> {
     let mut num_words = lsb16(num_words_packed);
 
+    if num_words == 0 && permutation_z_evals_ptr < perm_z_last_ptr {
+        return Err(VerifyError::KeyError {
+            message: "zero permutation stride in VKA metadata".to_string(),
+        });
+    }
+
     // Initialize the free static memory pointer to store the column evals.
     let ptr = u32_from_be_tail(
         &mload(memory, 0x40).expect("z_evals should be able to load the fmp ptr at this point."),
@@ -1390,6 +1396,11 @@ fn multi_rot_set(
     zeta: Fr,
     coeff_ptr: u32,
 ) -> Result<(Fr, usize), VerifyError> {
+    if rot_len == 0 {
+        return Err(VerifyError::KeyError {
+            message: "zero rot_len in VKA metadata".to_string(),
+        });
+    }
     let mut r_eval = Fr::ZERO;
     for i in 0..num_words {
         while !r_evals_data.is_zero() {
