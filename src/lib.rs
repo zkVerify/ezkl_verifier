@@ -33,7 +33,7 @@ use alloc::{
 };
 use ark_bn254_ext::CurveHooks;
 use ark_ec::{AffineRepr, CurveGroup, pairing::Pairing};
-use ark_ff::{AdditiveGroup, BigInteger, Field, One, PrimeField, fields::batch_inversion};
+use ark_ff::{AdditiveGroup, BigInteger, FftField, Field, One, PrimeField, fields::batch_inversion};
 use ark_models_ext::bn::{G1Prepared, G2Prepared};
 use core::{iter, ops::BitAnd};
 use sha3::{Digest, Keccak256};
@@ -1998,6 +1998,17 @@ fn compute_lagrange_and_instance_evaluation(
             message: format!("Unable to parse k from the VKA as an u32. Cause: {e}"),
         }
     })?;
+
+    // A 2^k-sized domain needs a primitive 2^k-th root of unity, which only exists up to
+    // the two-adicity of the scalar field.
+    if k > Fr::TWO_ADICITY {
+        return Err(VerifyError::KeyError {
+            message: format!(
+                "k ({k}) exceeds the two-adicity of the scalar field ({})",
+                Fr::TWO_ADICITY
+            ),
+        });
+    }
 
     let x = mload(memory, theta_mptr as u32 + 0x80)
         .map_err(|e| VerifyError::KeyError {
