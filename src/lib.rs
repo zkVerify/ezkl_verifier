@@ -33,7 +33,9 @@ use alloc::{
 };
 use ark_bn254_ext::CurveHooks;
 use ark_ec::{AffineRepr, CurveGroup, pairing::Pairing};
-use ark_ff::{AdditiveGroup, BigInteger, FftField, Field, One, PrimeField, fields::batch_inversion};
+use ark_ff::{
+    AdditiveGroup, BigInteger, FftField, Field, One, PrimeField, fields::batch_inversion,
+};
 use ark_models_ext::bn::{G1Prepared, G2Prepared};
 use core::{iter, ops::BitAnd};
 use sha3::{Digest, Keccak256};
@@ -2056,6 +2058,22 @@ fn compute_lagrange_and_instance_evaluation(
         message: format!("Unable to parse num_neg_lagranges from VKA as an u32. Cause: {e}"),
     })?;
 
+    // num_neg_lagranges is halo2's blinding_factors + 1, i.e. max(3, max_advice_queries) + 3, and
+    // max_advice_queries cannot exceed the number of evaluations read from the proof.
+    let num_evals = mload_u32(memory, (VKA_OFFSET + 0x60 + MEMORY_OFFSET) as u32).map_err(|e| {
+        VerifyError::KeyError {
+            message: format!("Unable to parse num_evals from VKA as an u32. Cause: {e}"),
+        }
+    })?;
+    let max_neg_lagranges = num_evals.max(3).saturating_add(3);
+    if !(6..=max_neg_lagranges).contains(&num_neg_lagranges) {
+        return Err(VerifyError::KeyError {
+            message: format!(
+                "num_neg_lagranges ({num_neg_lagranges}) outside the allowed range [6, {max_neg_lagranges}]"
+            ),
+        });
+    }
+
     let mut mptr_end = mptr + 32 * (num_instances + num_neg_lagranges) as usize;
     if num_instances == 0 {
         mptr_end += 0x20;
@@ -3626,13 +3644,14 @@ fn initialize_memory(
 
     challenge_len_data >>= 8;
     // num_evals is defined as u64 in order to be able to fit all possible u32 values
-    let num_evals = u64::from(
-        0x20 * mload_u32(memory, 0x60 + (VKA_OFFSET + MEMORY_OFFSET) as u32).map_err(|e| {
-            VerifyError::KeyError {
-                message: format!("Unable to read num_evals as u32. Cause: {e}").to_string(),
-            }
-        })?,
-    );
+    let num_evals = 0x20
+        * u64::from(
+            mload_u32(memory, 0x60 + (VKA_OFFSET + MEMORY_OFFSET) as u32).map_err(|e| {
+                VerifyError::KeyError {
+                    message: format!("Unable to read num_evals as u32. Cause: {e}").to_string(),
+                }
+            })?,
+        );
 
     Ok((
         theta_mptr,
@@ -3652,7 +3671,13 @@ fn read_evaluations(
     mut hash_mptr: usize,
     num_evals: u64,
 ) -> Result<(usize, usize), VerifyError> {
-    let proof_cptr_end = proof_cptr + num_evals as usize; // num_evals
+    // usize is 32 bits on wasm, where `num_evals as usize` would silently truncate.
+    let proof_cptr_end = usize::try_from(num_evals)
+        .ok()
+        .and_then(|n| proof_cptr.checked_add(n))
+        .ok_or(VerifyError::InvalidProofError {
+            message: format!("Evaluations section length ({num_evals}) is not addressable."),
+        })?;
     while proof_cptr < proof_cptr_end {
         let eval: EVMWord = load_from_proof(raw_proof, proof_cptr as u32).map_err(|e| {
             VerifyError::InvalidProofError {

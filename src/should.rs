@@ -649,6 +649,29 @@ mod reject {
     }
 
     #[rstest]
+    #[case::below_the_halo2_minimum(5)]
+    #[case::above_the_number_of_evaluations(21)]
+    fn a_vka_with_an_out_of_range_num_neg_lagranges(
+        valid_vka: [u8; 2592],
+        valid_raw_proof: [u8; 1248],
+        valid_instances: [PublicInput; 10],
+        #[case] num_neg_lagranges: u32,
+    ) {
+        // num_evals is 17 in this VKA, so the accepted range is [6, 20].
+        let mut invalid_vka = valid_vka;
+        invalid_vka[0x03fc..0x0400].copy_from_slice(&num_neg_lagranges.to_be_bytes());
+
+        assert_eq!(
+            verify::<()>(&invalid_vka, &valid_raw_proof, &valid_instances).unwrap_err(),
+            VerifyError::KeyError {
+                message: format!(
+                    "num_neg_lagranges ({num_neg_lagranges}) outside the allowed range [6, 20]"
+                )
+            }
+        );
+    }
+
+    #[rstest]
     fn a_proof_whose_length_is_not_a_multiple_of_32(
         valid_vka_alt: [u8; 6144],
         _valid_raw_proof_alt: [u8; 4192],
