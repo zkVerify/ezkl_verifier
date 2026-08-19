@@ -175,8 +175,8 @@ pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>,
         });
     }
 
-    let x = Fq::from_be_bytes_mod_order(&data[start..(start + 32)]);
-    let y = Fq::from_be_bytes_mod_order(&data[(start + 32)..(start + 64)]);
+    let x = read_fq_util(&data[start..(start + 32)])?;
+    let y = read_fq_util(&data[(start + 32)..(start + 64)])?;
 
     // If (0, 0) is given, we interpret this as the point at infinity:
     // https://docs.rs/ark-ec/0.5.0/src/ark_ec/models/short_weierstrass/affine.rs.html#212-218
@@ -197,23 +197,36 @@ pub(crate) fn read_g1<H: CurveHooks>(data: &[u8], start: usize) -> Result<G1<H>,
 }
 
 // Parse point in G2.
-pub(crate) fn read_g2<H: CurveHooks>(data: &[u8]) -> Result<G2<H>, ()> {
+pub(crate) fn read_g2<H: CurveHooks>(data: &[u8]) -> Result<G2<H>, GroupError> {
     if data.len() != 128 {
-        return Err(());
+        return Err(GroupError::InvalidSliceLength {
+            actual_length: data.len(),
+            expected_length: 128,
+        });
     }
 
     // Read in reverse order (i.e., imaginary part before real part) to match
     // Solidity's encoding:
     // https://eips.ethereum.org/EIPS/eip-197#encoding
-    let x_c1 = read_fq_util(&data[0..32]).expect("Parsing the SRS should always succeed!");
-    let x_c0 = read_fq_util(&data[32..64]).expect("Parsing the SRS should always succeed!");
-    let y_c1 = read_fq_util(&data[64..96]).expect("Parsing the SRS should always succeed!");
-    let y_c0 = read_fq_util(&data[96..128]).expect("Parsing the SRS should always succeed!");
+    let x_c1 = read_fq_util(&data[0..32])?;
+    let x_c0 = read_fq_util(&data[32..64])?;
+    let y_c1 = read_fq_util(&data[64..96])?;
+    let y_c0 = read_fq_util(&data[96..128])?;
 
     let x = Fq2::new(x_c0, x_c1);
     let y = Fq2::new(y_c0, y_c1);
 
-    Ok(G2::<H>::new(x, y))
+    let point = G2::<H>::new_unchecked(x, y);
+
+    // Unlike G1, BN254's G2 has a non-trivial cofactor, so the subgroup check is required.
+    if !point.is_on_curve() {
+        return Err(GroupError::NotOnCurve);
+    }
+    if !point.is_in_correct_subgroup_assuming_on_curve() {
+        return Err(GroupError::NotInSubgroup);
+    }
+
+    Ok(point)
 }
 
 // Utility function for parsing points in G2
@@ -232,6 +245,11 @@ pub(crate) fn read_fq_util(data: &[u8]) -> Result<Fq, FieldError> {
     }
 
     let bigint = U256::new(limbs);
+
+    // Mirrors `lt(x, Q)` in read_ec_point; also required because `into_fq()` panics for >= q.
+    if bigint >= Fq::MODULUS {
+        return Err(FieldError::NotMember);
+    }
 
     Ok(bigint.into_fq())
 }

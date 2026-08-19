@@ -84,8 +84,27 @@ pub enum GroupError {
         actual_length: usize,
         expected_length: usize,
     },
-    /// Provided slice is too short.
+    /// Point is not on the curve.
     NotOnCurve,
+    /// Coordinate is not reduced modulo the base field.
+    NotCanonical,
+    /// Point is on the curve, but outside of the prime-order subgroup.
+    NotInSubgroup,
+}
+
+impl From<FieldError> for GroupError {
+    fn from(e: FieldError) -> Self {
+        match e {
+            FieldError::NotMember => GroupError::NotCanonical,
+            FieldError::InvalidSliceLength {
+                actual_length,
+                expected_length,
+            } => GroupError::InvalidSliceLength {
+                actual_length,
+                expected_length,
+            },
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]

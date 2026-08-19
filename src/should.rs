@@ -625,6 +625,53 @@ mod reject {
     }
 
     #[rstest]
+    fn a_proof_with_a_non_canonical_ec_point(
+        valid_vka: [u8; 2592],
+        valid_raw_proof: [u8; 1248],
+        valid_instances: [PublicInput; 10],
+    ) {
+        use crate::utils::{IntoBEBytes32, IntoU256};
+        use ark_ff::BigInteger;
+
+        // x + q reduces to x, so this re-encodes the same curve point non-canonically.
+        let mut invalid_raw_proof = valid_raw_proof;
+        let x: EVMWord = invalid_raw_proof[0x00..0x20].try_into().unwrap();
+        let mut x = x.into_u256();
+        assert!(!x.add_with_carry(&Fq::MODULUS));
+        invalid_raw_proof[0x00..0x20].copy_from_slice(&x.into_be_bytes32());
+
+        assert_eq!(
+            verify::<()>(&valid_vka, &invalid_raw_proof, &valid_instances).unwrap_err(),
+            VerifyError::InvalidProofError {
+                message: "Invalid Proof. Unable to read G1 point from proof. Cause: Coordinate is not reduced modulo the base field.".to_string()
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::below_the_halo2_minimum(5)]
+    #[case::above_the_number_of_evaluations(21)]
+    fn a_vka_with_an_out_of_range_num_neg_lagranges(
+        valid_vka: [u8; 2592],
+        valid_raw_proof: [u8; 1248],
+        valid_instances: [PublicInput; 10],
+        #[case] num_neg_lagranges: u32,
+    ) {
+        // num_evals is 17 in this VKA, so the accepted range is [6, 20].
+        let mut invalid_vka = valid_vka;
+        invalid_vka[0x03fc..0x0400].copy_from_slice(&num_neg_lagranges.to_be_bytes());
+
+        assert_eq!(
+            verify::<()>(&invalid_vka, &valid_raw_proof, &valid_instances).unwrap_err(),
+            VerifyError::KeyError {
+                message: format!(
+                    "num_neg_lagranges ({num_neg_lagranges}) outside the allowed range [6, 20]"
+                )
+            }
+        );
+    }
+
+    #[rstest]
     fn a_proof_whose_length_is_not_a_multiple_of_32(
         valid_vka_alt: [u8; 6144],
         _valid_raw_proof_alt: [u8; 4192],

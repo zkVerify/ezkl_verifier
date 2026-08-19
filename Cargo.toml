@@ -1,6 +1,6 @@
 [package]
 name = "ezkl-no-std"
-version = "0.1.0"
+version = "0.1.1"
 keywords = ["cryptography", "elliptic-curves", "pairing", "zk-SNARKs"]
 categories = ["cryptography"]
 edition = "2024"
